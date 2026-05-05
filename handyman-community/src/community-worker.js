@@ -52,6 +52,9 @@ export default {
         { loc: "/questions",    changefreq: "hourly",  priority: "0.8" },
         { loc: "/projects",     changefreq: "hourly",  priority: "0.8" },
         { loc: "/partners",     changefreq: "weekly",  priority: "0.6" },
+        { loc: "/about",        changefreq: "monthly", priority: "0.5" },
+        { loc: "/privacy",      changefreq: "monthly", priority: "0.3" },
+        { loc: "/terms",        changefreq: "monthly", priority: "0.3" },
       ];
       const urls = pages.map(p =>
         `<url><loc>https://${hostname}${p.loc}</loc><lastmod>${today}</lastmod><changefreq>${p.changefreq}</changefreq><priority>${p.priority}</priority></url>`
@@ -82,12 +85,55 @@ export default {
 
     if (url.pathname === "/.well-known/agent.json") {
       return Response.json({
-        name:        domainInfo.site_name,
-        domain:      hostname,
-        vertical:    "Handyman",
-        hub:         HANDYMAN_API,
-        description: domainInfo.tagline,
-        network:     "Handyman Partner Network",
+        "@context":   "https://schema.org",
+        "@type":      "WebSite",
+        "name":       domainInfo.site_name,
+        "url":        `https://${hostname}`,
+        "domain":     hostname,
+        "vertical":   "Handyman",
+        "hub":        HANDYMAN_API,
+        "description": domainInfo.tagline,
+        "network":    "Handyman Partner Network",
+        "publisher": {
+          "@type": "Organization",
+          "name":  "VNOC / VentureOS",
+          "url":   "https://www.vnoc.com",
+        },
+        "potentialAction": [
+          { "@type": "SearchAction",  "target": `${HANDYMAN_API}/contractors?q={query}`, "query-input": "required name=query" },
+          { "@type": "RegisterAction","target": `${HANDYMAN_API}/signup`,                "name": "Join as Contractor" },
+        ],
+        "sameAs": [ HANDYMAN_API, `https://www.handyman.com/partners` ],
+        "inLanguage":         "en-US",
+        "copyrightYear":      new Date().getFullYear(),
+        "license":            `https://${hostname}/terms`,
+        "privacyPolicy":      `https://${hostname}/privacy`,
+        "sitemap":            `https://${hostname}/sitemap.xml`,
+        "agentCapabilities":  ["content-indexing","lead-capture","affiliate-referral"],
+        "partnerNetwork":     "https://www.vnoc.com",
+        "contactPoint": {
+          "@type":       "ContactPoint",
+          "contactType": "Partner Inquiries",
+          "url":         `${HANDYMAN_API}/partners`,
+        },
+      }, {
+        headers: { "Cache-Control": "public, max-age=86400" }
+      });
+    }
+
+    if (url.pathname === "/about") {
+      return new Response(renderStaticPage("about", hostname, domainInfo, HANDYMAN_API), {
+        headers: { "Content-Type": "text/html;charset=UTF-8", "Cache-Control": "public, max-age=3600" }
+      });
+    }
+    if (url.pathname === "/privacy") {
+      return new Response(renderStaticPage("privacy", hostname, domainInfo, HANDYMAN_API), {
+        headers: { "Content-Type": "text/html;charset=UTF-8", "Cache-Control": "public, max-age=86400" }
+      });
+    }
+    if (url.pathname === "/terms") {
+      return new Response(renderStaticPage("terms", hostname, domainInfo, HANDYMAN_API), {
+        headers: { "Content-Type": "text/html;charset=UTF-8", "Cache-Control": "public, max-age=86400" }
       });
     }
 
@@ -288,6 +334,139 @@ function timeAgo(dateStr) {
     if (h < 24)   return `${h}h ago`;
     return `${Math.floor(h / 24)}d ago`;
   } catch { return ""; }
+}
+
+// ─── Static pages (about / privacy / terms) ──────────────────────────────────
+
+function renderStaticPage(type, hostname, domainInfo, HANDYMAN_API) {
+  const year      = new Date().getFullYear();
+  const siteName  = esc(domainInfo.site_name);
+  const brandColor = domainInfo.brand_color ?? BRAND_COLOR_DEFAULT;
+
+  const shell = (title, body) => `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)} — ${siteName}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',system-ui,sans-serif;background:#f5f4f2;color:#1a1a1a;line-height:1.7}
+a{color:${brandColor};text-decoration:none}
+a:hover{text-decoration:underline}
+.bar{background:${brandColor};padding:0 24px;height:60px;display:flex;align-items:center;
+     justify-content:space-between;position:sticky;top:0;z-index:100}
+.bar-brand{color:#fff;font-weight:700;font-size:1rem;display:flex;align-items:center;gap:8px}
+.bar-back{color:rgba(255,255,255,.8);font-size:.85rem;padding:7px 14px;border-radius:7px;
+          background:rgba(255,255,255,.1);transition:background .2s}
+.bar-back:hover{background:rgba(255,255,255,.2);text-decoration:none;color:#fff}
+.wrap{max-width:760px;margin:48px auto;padding:0 24px 80px}
+.prose h1{font-size:1.9rem;font-weight:800;margin-bottom:10px;line-height:1.2}
+.prose h2{font-size:1.15rem;font-weight:700;margin:32px 0 10px;color:${brandColor}}
+.prose p{margin-bottom:14px;font-size:.95rem;color:#374151}
+.prose ul{margin:0 0 14px 20px}
+.prose li{font-size:.95rem;color:#374151;margin-bottom:6px}
+.prose .updated{font-size:.8rem;color:#9ca3af;margin-bottom:28px}
+footer{background:#111;color:#6b7280;padding:20px 24px;text-align:center;font-size:.78rem;margin-top:0}
+footer a{color:#FF9000}
+</style>
+</head>
+<body>
+<nav class="bar">
+  <div class="bar-brand">🔨 ${siteName}</div>
+  <a href="/" class="bar-back">← Back to Home</a>
+</nav>
+<div class="wrap"><div class="prose">${body}</div></div>
+<footer>© ${year} ${siteName} · Powered by <a href="https://www.handyman.com" target="_blank">Handyman.com</a> &amp; <a href="https://vnoc.com" target="_blank">VNOC</a></footer>
+</body></html>`;
+
+  if (type === "about") {
+    return shell("About", `
+      <h1>About ${siteName}</h1>
+      <p class="updated">Part of the Handyman.com Partner Network</p>
+      <p><strong>${siteName}</strong> is a community resource for homeowners and contractors. We connect people who need home improvement work done with skilled, vetted professionals — and give the community a place to share projects, ask questions, and find answers.</p>
+      <h2>What We Do</h2>
+      <ul>
+        <li>Showcase real home improvement projects in your area</li>
+        <li>Host a Q&amp;A forum where homeowners and pros share knowledge</li>
+        <li>Connect visitors with trusted, paid contractors on <a href="${esc(HANDYMAN_API)}" target="_blank">Handyman.com</a></li>
+        <li>Help contractors grow their business through our partner referral program</li>
+      </ul>
+      <h2>The Network</h2>
+      <p>This site is part of the <strong>Handyman.com Partner Network</strong>, operated by VNOC / VentureOS. Our network spans thousands of home improvement domains, all directing quality traffic to verified contractors.</p>
+      <h2>For Contractors</h2>
+      <p>Want to get featured on this site and others in our network? <a href="${esc(HANDYMAN_API)}/signup" target="_blank">Join Handyman.com as a contractor</a> and your profile will appear on partner domains in your service area.</p>
+      <h2>For Domain Owners</h2>
+      <p>Own a home improvement domain? <a href="${esc(HANDYMAN_API)}/partners" target="_blank">Apply to our partner program</a> and earn commission on every contractor signup you refer.</p>
+      <h2>Contact</h2>
+      <p>For partnership inquiries, visit <a href="${esc(HANDYMAN_API)}/partners" target="_blank">Handyman.com/partners</a>. For support, visit <a href="${esc(HANDYMAN_API)}/contact" target="_blank">Handyman.com/contact</a>.</p>
+    `);
+  }
+
+  if (type === "privacy") {
+    return shell("Privacy Policy", `
+      <h1>Privacy Policy</h1>
+      <p class="updated">Last updated: ${new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"})}</p>
+      <p>This Privacy Policy describes how <strong>${siteName}</strong> ("we", "us", or "our") collects, uses, and shares information when you visit <strong>${hostname}</strong> (the "Site").</p>
+      <h2>Information We Collect</h2>
+      <ul>
+        <li><strong>Email address and name</strong> — if you subscribe to our newsletter or fill out a contact form</li>
+        <li><strong>Usage data</strong> — pages visited, time on site, referral source (via Cloudflare analytics — no cookies required)</li>
+        <li><strong>IP address</strong> — collected automatically for security and abuse prevention</li>
+      </ul>
+      <h2>How We Use Your Information</h2>
+      <ul>
+        <li>To send you home improvement tips and community updates (newsletter subscribers only)</li>
+        <li>To connect you with contractors via <a href="${esc(HANDYMAN_API)}" target="_blank">Handyman.com</a></li>
+        <li>To improve site content and user experience</li>
+        <li>To prevent fraud and abuse</li>
+      </ul>
+      <h2>Cookies</h2>
+      <p>This site uses minimal browser storage (localStorage) solely to remember your newsletter preference (whether you have dismissed the signup modal). We do not use advertising cookies or third-party tracking pixels.</p>
+      <h2>Sharing Your Information</h2>
+      <p>We do not sell your personal information. If you submit a form, your data is shared with the Handyman.com platform (operated by the same network) to facilitate contractor connections. We may share data with service providers who assist us in operating the site, subject to confidentiality agreements.</p>
+      <h2>Data Retention</h2>
+      <p>Newsletter subscriber emails are retained until you unsubscribe. You can request deletion at any time by contacting us via <a href="${esc(HANDYMAN_API)}/contact" target="_blank">Handyman.com/contact</a>.</p>
+      <h2>Third-Party Links</h2>
+      <p>This site links to Handyman.com and other partner sites. We are not responsible for the privacy practices of those sites. Please review their privacy policies separately.</p>
+      <h2>Your Rights</h2>
+      <p>Depending on your location, you may have rights to access, correct, or delete your personal data. To exercise these rights, contact us via <a href="${esc(HANDYMAN_API)}/contact" target="_blank">Handyman.com/contact</a>.</p>
+      <h2>Changes</h2>
+      <p>We may update this policy from time to time. The "last updated" date at the top reflects the most recent revision. Continued use of the site constitutes acceptance of the updated policy.</p>
+    `);
+  }
+
+  if (type === "terms") {
+    return shell("Terms of Use", `
+      <h1>Terms of Use</h1>
+      <p class="updated">Last updated: ${new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"})}</p>
+      <p>By accessing or using <strong>${hostname}</strong> (the "Site"), you agree to be bound by these Terms of Use. If you do not agree, please do not use the Site.</p>
+      <h2>Use of the Site</h2>
+      <ul>
+        <li>This Site is provided for informational purposes to connect homeowners with contractors</li>
+        <li>You must be at least 18 years old to use this Site</li>
+        <li>You agree not to use the Site for any unlawful or abusive purpose</li>
+        <li>You agree not to scrape, copy, or redistribute content without written permission</li>
+      </ul>
+      <h2>Contractor Listings</h2>
+      <p>Contractor profiles shown on this Site are sourced from <a href="${esc(HANDYMAN_API)}" target="_blank">Handyman.com</a>. We make no guarantee regarding the accuracy, quality, or availability of any contractor. Always verify contractor credentials independently before hiring.</p>
+      <h2>Affiliate Relationships</h2>
+      <p>This Site participates in the Handyman.com Partner Program. When you click a link and sign up as a contractor or homeowner, this site may receive a referral commission. This does not affect your cost or experience.</p>
+      <h2>Intellectual Property</h2>
+      <p>All content on this Site (text, design, code) is owned by or licensed to VNOC / VentureOS. You may not reproduce or distribute content without prior written consent.</p>
+      <h2>Disclaimer of Warranties</h2>
+      <p>The Site is provided "as is" without warranties of any kind, express or implied. We do not warrant that the Site will be uninterrupted, error-free, or free of harmful components.</p>
+      <h2>Limitation of Liability</h2>
+      <p>To the fullest extent permitted by law, we shall not be liable for any indirect, incidental, or consequential damages arising from your use of the Site or any contractor services found through it.</p>
+      <h2>Governing Law</h2>
+      <p>These Terms are governed by the laws of the State of Delaware, USA, without regard to conflict of law principles.</p>
+      <h2>Contact</h2>
+      <p>For questions about these Terms, visit <a href="${esc(HANDYMAN_API)}/contact" target="_blank">Handyman.com/contact</a>.</p>
+    `);
+  }
+
+  return shell("Page Not Found", `<h1>Page Not Found</h1><p><a href="/">Return to home →</a></p>`);
 }
 
 // ─── Section builders ─────────────────────────────────────────────────────────
