@@ -45,10 +45,30 @@ export default {
       );
     }
     if (url.pathname === "/sitemap.xml") {
-      return new Response(
-        `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://${hostname}/</loc><changefreq>hourly</changefreq></url></urlset>`,
-        { headers: { "Content-Type": "application/xml" } }
-      );
+      const today = new Date().toISOString().split("T")[0];
+      const pages = [
+        { loc: "/",             changefreq: "daily",   priority: "1.0" },
+        { loc: "/contractors",  changefreq: "daily",   priority: "0.9" },
+        { loc: "/questions",    changefreq: "hourly",  priority: "0.8" },
+        { loc: "/projects",     changefreq: "hourly",  priority: "0.8" },
+        { loc: "/partners",     changefreq: "weekly",  priority: "0.6" },
+      ];
+      const urls = pages.map(p =>
+        `<url><loc>https://${hostname}${p.loc}</loc><lastmod>${today}</lastmod><changefreq>${p.changefreq}</changefreq><priority>${p.priority}</priority></url>`
+      ).join("\n  ");
+      const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9
+          http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
+  ${urls}
+</urlset>`;
+      return new Response(sitemap, {
+        headers: {
+          "Content-Type":  "application/xml; charset=UTF-8",
+          "Cache-Control": "public, max-age=3600",
+        }
+      });
     }
 
     // Fetch domain info, affiliate ID, and content in parallel
@@ -683,6 +703,38 @@ footer{background:#111;color:#6b7280;padding:28px 24px;text-align:center;font-si
 footer a{color:var(--orange)}
 .footer-links{display:flex;justify-content:center;gap:20px;margin-bottom:10px;flex-wrap:wrap}
 
+/* Newsletter modal */
+.nl-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9000;
+            display:flex;align-items:center;justify-content:center;padding:20px;
+            opacity:0;transition:opacity .3s;pointer-events:none}
+.nl-overlay.show{opacity:1;pointer-events:all}
+.nl-box{background:#fff;border-radius:20px;max-width:460px;width:100%;
+        box-shadow:0 24px 80px rgba(0,0,0,.25);overflow:hidden;
+        transform:translateY(24px) scale(.97);transition:transform .3s}
+.nl-overlay.show .nl-box{transform:translateY(0) scale(1)}
+.nl-top{background:linear-gradient(135deg,var(--brand) 0%,#3a0000 100%);
+        padding:32px 28px 24px;position:relative;text-align:center}
+.nl-close{position:absolute;top:14px;right:16px;background:rgba(255,255,255,.15);
+          border:none;color:#fff;width:30px;height:30px;border-radius:50%;
+          font-size:1.1rem;cursor:pointer;line-height:30px;padding:0;transition:background .2s}
+.nl-close:hover{background:rgba(255,255,255,.3)}
+.nl-icon{font-size:2.4rem;margin-bottom:10px}
+.nl-top h2{color:#fff;font-size:1.35rem;font-weight:800;margin-bottom:6px}
+.nl-top p{color:rgba(255,255,255,.8);font-size:.88rem;line-height:1.5}
+.nl-body{padding:24px 28px 28px}
+.nl-input{width:100%;padding:12px 16px;border:1.5px solid var(--border);border-radius:9px;
+          font-size:.92rem;font-family:inherit;margin-bottom:10px;transition:border-color .2s;box-sizing:border-box}
+.nl-input:focus{outline:none;border-color:var(--brand)}
+.nl-submit{width:100%;background:var(--brand);color:#fff;border:none;padding:13px;
+           border-radius:9px;font-weight:700;font-size:.95rem;cursor:pointer;transition:background .2s}
+.nl-submit:hover{background:#4a0505}
+.nl-msg{margin-top:10px;padding:10px 14px;border-radius:7px;font-size:.85rem;display:none;text-align:center}
+.nl-msg.ok{background:#dcfce7;color:#166534}
+.nl-msg.err{background:#fee2e2;color:#991b1b}
+.nl-skip{display:block;text-align:center;margin-top:12px;font-size:.78rem;
+         color:var(--muted);cursor:pointer;text-decoration:underline}
+.nl-skip:hover{color:var(--brand)}
+
 @media(max-width:860px){
   .content{grid-template-columns:1fr}
   .sidebar{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -977,6 +1029,25 @@ ${partnerSectionHtml}
 <!-- Related Domains Section -->
 ${relatedSectionHtml}
 
+<!-- Newsletter Modal -->
+<div class="nl-overlay" id="nlOverlay" role="dialog" aria-modal="true" aria-labelledby="nlTitle">
+  <div class="nl-box">
+    <div class="nl-top">
+      <button class="nl-close" onclick="nlClose()" aria-label="Close">✕</button>
+      <div class="nl-icon">🔨</div>
+      <h2 id="nlTitle">Get Home Improvement Tips</h2>
+      <p>Join thousands of homeowners getting free contractor tips, project ideas, and community Q&amp;A delivered weekly.</p>
+    </div>
+    <div class="nl-body">
+      <input class="nl-input" id="nlName"  type="text"  placeholder="Your first name (optional)" autocomplete="given-name">
+      <input class="nl-input" id="nlEmail" type="email" placeholder="Your email address *" autocomplete="email" required>
+      <button class="nl-submit" onclick="nlSubmit()">Subscribe Free →</button>
+      <div class="nl-msg" id="nlMsg"></div>
+      <span class="nl-skip" onclick="nlClose()">No thanks, maybe later</span>
+    </div>
+  </div>
+</div>
+
 <!-- Footer -->
 <footer>
   <div class="footer-links">
@@ -1026,6 +1097,99 @@ function searchContractors() {
   var el = document.getElementById(id);
   if (el) el.addEventListener('keydown', function(e){ if (e.key === 'Enter') searchContractors(); });
 });
+
+// ── Newsletter Modal ──────────────────────────────────────────────────────────
+(function() {
+  var STORAGE_KEY = 'nl_dismissed_${hostname}';
+  // Don't show if already dismissed/subscribed this session or in last 7 days
+  try {
+    var ts = localStorage.getItem(STORAGE_KEY);
+    if (ts && (Date.now() - parseInt(ts, 10)) < 7 * 24 * 60 * 60 * 1000) return;
+  } catch(e) {}
+
+  // Show after 6 seconds or after scrolling 40% of the page
+  var shown = false;
+  function showModal() {
+    if (shown) return;
+    shown = true;
+    var overlay = document.getElementById('nlOverlay');
+    if (overlay) {
+      overlay.style.display = 'flex';
+      requestAnimationFrame(function(){ overlay.classList.add('show'); });
+      document.getElementById('nlEmail').focus();
+    }
+  }
+
+  var timer = setTimeout(showModal, 6000);
+
+  window.addEventListener('scroll', function onScroll() {
+    var scrolled = (window.scrollY / (document.body.scrollHeight - window.innerHeight)) * 100;
+    if (scrolled >= 40) { clearTimeout(timer); showModal(); window.removeEventListener('scroll', onScroll); }
+  }, { passive: true });
+
+  // Close on overlay click (outside box)
+  var overlay = document.getElementById('nlOverlay');
+  if (overlay) {
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) nlClose();
+    });
+  }
+
+  // Close on Escape
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') nlClose(); });
+})();
+
+function nlClose() {
+  var overlay = document.getElementById('nlOverlay');
+  if (!overlay) return;
+  overlay.classList.remove('show');
+  setTimeout(function(){ overlay.style.display = 'none'; }, 300);
+  try { localStorage.setItem('nl_dismissed_${hostname}', String(Date.now())); } catch(e) {}
+}
+
+function nlSubmit() {
+  var email = (document.getElementById('nlEmail').value || '').trim();
+  var name  = (document.getElementById('nlName').value  || '').trim();
+  var msg   = document.getElementById('nlMsg');
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    msg.className = 'nl-msg err'; msg.style.display = 'block';
+    msg.textContent = 'Please enter a valid email address.'; return;
+  }
+
+  var btn = document.querySelector('.nl-submit');
+  btn.disabled = true; btn.textContent = 'Subscribing…';
+  msg.style.display = 'none';
+
+  var fd = new FormData();
+  fd.append('type',   'lead');
+  fd.append('domain', '${hostname}');
+  fd.append('email',  email);
+  fd.append('name',   name);
+  fd.append('message','Newsletter signup from ${hostname}');
+
+  fetch('https://manage.vnoc.com/ajax/lander_submit.php', { method: 'POST', body: fd })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+      if (j.success) {
+        msg.className = 'nl-msg ok'; msg.style.display = 'block';
+        msg.textContent = '🎉 You\'re subscribed! Check your inbox soon.';
+        btn.style.display = 'none';
+        document.querySelector('.nl-skip').style.display = 'none';
+        try { localStorage.setItem('nl_dismissed_${hostname}', String(Date.now())); } catch(e) {}
+        setTimeout(nlClose, 3000);
+      } else {
+        msg.className = 'nl-msg err'; msg.style.display = 'block';
+        msg.textContent = j.msg || 'Something went wrong. Please try again.';
+        btn.disabled = false; btn.textContent = 'Subscribe Free →';
+      }
+    })
+    .catch(function() {
+      msg.className = 'nl-msg err'; msg.style.display = 'block';
+      msg.textContent = 'Network error. Please try again.';
+      btn.disabled = false; btn.textContent = 'Subscribe Free →';
+    });
+}
 </script>
 
 </body>
