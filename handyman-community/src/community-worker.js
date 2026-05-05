@@ -1587,7 +1587,7 @@ function nlSubmit() {
     .then(function(j) {
       if (j.success) {
         msg.className = 'nl-msg ok'; msg.style.display = 'block';
-        msg.textContent = '🎉 You\'re subscribed! Check your inbox soon.';
+        msg.textContent = '🎉 You are subscribed! Check your inbox soon.';
         btn.style.display = 'none';
         document.querySelector('.nl-skip').style.display = 'none';
         try { localStorage.setItem('nl_dismissed_${hostname}', String(Date.now())); } catch(e) {}
