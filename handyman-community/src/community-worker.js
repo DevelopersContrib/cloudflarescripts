@@ -51,6 +51,7 @@ export default {
         { loc: "/contractors",  changefreq: "daily",   priority: "0.9" },
         { loc: "/questions",    changefreq: "hourly",  priority: "0.8" },
         { loc: "/projects",     changefreq: "hourly",  priority: "0.8" },
+        { loc: "/contribute",   changefreq: "daily",   priority: "0.7" },
         { loc: "/partners",     changefreq: "weekly",  priority: "0.6" },
         { loc: "/about",        changefreq: "monthly", priority: "0.5" },
         { loc: "/privacy",      changefreq: "monthly", priority: "0.3" },
@@ -75,13 +76,19 @@ export default {
     }
 
     // Fetch domain info, affiliate ID, and content in parallel
-    const [domainInfo, refId, projects, questions, contractors] = await Promise.all([
+    const [domainInfo, refId, projects, questions, contractors, contribTasks] = await Promise.all([
       fetchDomainInfo(hostname, env),
       getOrRegisterAffiliate(hostname, HANDYMAN_API, WORKER_KEY, env),
       fetchProjects(HANDYMAN_API, env),
       fetchQuestions(HANDYMAN_API, env),
       fetchContractors(HANDYMAN_API, env),
+      fetchContribTasks(hostname, env),
     ]);
+
+    // signupLink + referLink needed for several routes below
+    const signupLinkEarly = refId
+      ? `${HANDYMAN_API}/signup?ref=${refId}&refType=contractor`
+      : `${HANDYMAN_API}/signup`;
 
     if (url.pathname === "/.well-known/agent.json") {
       return Response.json({
@@ -121,6 +128,12 @@ export default {
       });
     }
 
+    if (url.pathname === "/contribute") {
+      return new Response(renderContributePage(hostname, domainInfo, contribTasks, HANDYMAN_API, signupLinkEarly), {
+        headers: { "Content-Type": "text/html;charset=UTF-8", "Cache-Control": "public, max-age=300" }
+      });
+    }
+
     if (url.pathname === "/about") {
       return new Response(renderStaticPage("about", hostname, domainInfo, HANDYMAN_API), {
         headers: { "Content-Type": "text/html;charset=UTF-8", "Cache-Control": "public, max-age=3600" }
@@ -137,10 +150,8 @@ export default {
       });
     }
 
-    const signupLink = refId
-      ? `${HANDYMAN_API}/signup?ref=${refId}&refType=contractor`
-      : `${HANDYMAN_API}/signup`;
-    const referLink = `${HANDYMAN_API}/refer/${hostname.replace(/\./g, "-")}`;
+    const signupLink = signupLinkEarly;
+    const referLink  = `${HANDYMAN_API}/refer/${hostname.replace(/\./g, "-")}`;
 
     const html = renderPage({
       hostname,
@@ -286,6 +297,41 @@ async function fetchQuestions(HANDYMAN_API, env) {
       const list = data.questions ?? data ?? [];
       if (env.CACHE) await env.CACHE.put("hm:questions", JSON.stringify(list), { expirationTtl: CACHE_TTL });
       return list;
+    }
+  } catch (_) {}
+  return [];
+}
+
+async function fetchContribTasks(hostname, env) {
+  if (env.CACHE) {
+    const c = await env.CACHE.get(`contrib:tasks:${hostname}`);
+    if (c) return JSON.parse(c);
+  }
+  try {
+    // Try domain-specific tasks first, fall back to latest
+    const res = await fetch(
+      `https://www.contrib.com/api/public/domain_tasks?domain=${encodeURIComponent(hostname)}&limit=6`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const list = data.tasks ?? data ?? [];
+      if (Array.isArray(list) && list.length > 0) {
+        if (env.CACHE) await env.CACHE.put(`contrib:tasks:${hostname}`, JSON.stringify(list), { expirationTtl: CACHE_TTL });
+        return list;
+      }
+    }
+    // Fallback: latest tasks
+    const res2 = await fetch(`https://www.contrib.com/api/public/domain_tasks?limit=6`, {
+      headers: { Accept: "application/json" }
+    });
+    if (res2.ok) {
+      const data2 = await res2.json();
+      const list2 = data2.tasks ?? data2 ?? [];
+      if (Array.isArray(list2)) {
+        if (env.CACHE) await env.CACHE.put(`contrib:tasks:${hostname}`, JSON.stringify(list2), { expirationTtl: CACHE_TTL });
+        return list2;
+      }
     }
   } catch (_) {}
   return [];
@@ -467,6 +513,193 @@ footer a{color:#FF9000}
   }
 
   return shell("Page Not Found", `<h1>Page Not Found</h1><p><a href="/">Return to home →</a></p>`);
+}
+
+// ─── Contribute page renderer ─────────────────────────────────────────────────
+
+function renderContributePage(hostname, domainInfo, tasks, HANDYMAN_API, signupLink) {
+  const year       = new Date().getFullYear();
+  const siteName   = esc(domainInfo.site_name);
+  const brandColor = domainInfo.brand_color ?? BRAND_COLOR_DEFAULT;
+  const contribUrl = `https://www.contrib.com/to/${hostname}`;
+
+  const taskCards = tasks.length
+    ? tasks.map(t => {
+        const title   = esc((t.title ?? t.task_name ?? t.name ?? "Task").slice(0, 70));
+        const desc    = esc((t.description ?? t.desc ?? "").slice(0, 120));
+        const reward  = t.reward ?? t.pay ?? t.equity ?? null;
+        const type    = esc(t.type ?? t.category ?? t.task_type ?? "Task");
+        const taskUrl = t.url ?? `${contribUrl}`;
+        const status  = t.status ?? "open";
+        const badgeColor = status === "open" ? "#dcfce7" : "#fef3c7";
+        const badgeText  = status === "open" ? "#166534" : "#92400e";
+        return `
+      <div style="background:#fff;border:1.5px solid #e5e7eb;border-radius:14px;padding:20px 22px;
+                  transition:all .25s" onmouseover="this.style.borderColor='${brandColor}';this.style.boxShadow='0 6px 24px rgba(0,0,0,.1)'"
+                  onmouseout="this.style.borderColor='#e5e7eb';this.style.boxShadow='none'">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px">
+          <div>
+            <span style="background:#f0f4ff;color:#3730a3;font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:100px;text-transform:uppercase;letter-spacing:.05em">${type}</span>
+            <span style="background:${badgeColor};color:${badgeText};font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:100px;margin-left:6px">${esc(status)}</span>
+          </div>
+          ${reward ? `<div style="font-weight:800;color:${brandColor};font-size:.95rem;white-space:nowrap">${esc(String(reward))}</div>` : ""}
+        </div>
+        <div style="font-weight:700;font-size:1rem;margin-bottom:6px;line-height:1.3">${title}</div>
+        ${desc ? `<div style="font-size:.83rem;color:#6b7280;line-height:1.5;margin-bottom:14px">${desc}${(t.description ?? "").length > 120 ? "…" : ""}</div>` : ""}
+        <a href="${esc(taskUrl)}" target="_blank" rel="noopener"
+           style="display:inline-block;background:${brandColor};color:#fff;padding:9px 20px;
+                  border-radius:8px;font-size:.83rem;font-weight:700">View Task →</a>
+      </div>`;
+      }).join("")
+    : `<div style="text-align:center;padding:48px 20px;background:#fff;border-radius:14px;border:2px dashed #e5e7eb">
+        <div style="font-size:3rem;margin-bottom:12px">🚀</div>
+        <h3 style="font-size:1.1rem;font-weight:700;margin-bottom:8px">Be the First Contributor</h3>
+        <p style="color:#6b7280;font-size:.9rem;margin-bottom:18px">No tasks posted yet for ${esc(hostname)}. Post the first one on contrib.com!</p>
+        <a href="${esc(contribUrl)}" target="_blank" rel="noopener"
+           style="display:inline-block;background:${brandColor};color:#fff;padding:11px 24px;
+                  border-radius:9px;font-weight:700;font-size:.9rem">Start on Contrib.com →</a>
+      </div>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Contribute to ${siteName}</title>
+<meta name="description" content="Help build ${siteName} — find tasks, contribute skills, and earn equity or rewards on Contrib.com">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',system-ui,sans-serif;background:#f5f4f2;color:#1a1a1a;line-height:1.6}
+a{text-decoration:none;color:inherit}
+.navbar{position:sticky;top:0;z-index:100;background:rgba(103,7,8,.97);backdrop-filter:blur(12px);
+        border-bottom:1px solid rgba(255,255,255,.08);padding:0 24px;height:64px;
+        display:flex;align-items:center;justify-content:space-between}
+.navbar-brand{color:#fff;font-weight:700;font-size:1.05rem;display:flex;align-items:center;gap:10px}
+.nav-btn{background:#FF9000;color:#fff;padding:9px 22px;border-radius:8px;font-weight:600;font-size:.88rem}
+.hero{background:linear-gradient(135deg,${brandColor} 0%,#1a0000 100%);padding:72px 24px 60px;text-align:center}
+.hero-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.12);
+            border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.9);
+            padding:6px 16px;border-radius:100px;font-size:.8rem;font-weight:500;margin-bottom:18px}
+.hero h1{font-size:clamp(1.8rem,4vw,3rem);font-weight:900;color:#fff;line-height:1.1;
+         margin-bottom:12px;letter-spacing:-.02em}
+.hero h1 span{color:#FF9000}
+.hero p{color:rgba(255,255,255,.8);font-size:1rem;max-width:520px;margin:0 auto 28px;line-height:1.5}
+.btn-primary{display:inline-block;background:#FF9000;color:#fff;padding:14px 32px;border-radius:10px;
+             font-weight:700;font-size:.95rem;box-shadow:0 4px 20px rgba(255,144,0,.4);transition:all .2s}
+.btn-primary:hover{background:#e07800;transform:translateY(-1px)}
+.btn-outline{display:inline-block;background:rgba(255,255,255,.12);color:#fff;padding:14px 28px;
+             border-radius:10px;font-weight:600;font-size:.9rem;border:1px solid rgba(255,255,255,.25);
+             transition:all .2s;margin-left:12px}
+.btn-outline:hover{background:rgba(255,255,255,.22)}
+.wrap{max-width:900px;margin:0 auto;padding:48px 24px 80px}
+.how-it-works{background:#fff;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;
+              padding:56px 24px}
+.how-inner{max-width:900px;margin:0 auto}
+.steps{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:24px;margin-top:32px}
+.step{text-align:center;padding:24px 16px}
+.step-num{width:44px;height:44px;background:${brandColor};color:#fff;border-radius:50%;
+          display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.1rem;
+          margin:0 auto 14px}
+.step-title{font-weight:700;font-size:.95rem;margin-bottom:6px}
+.step-desc{font-size:.82rem;color:#6b7280;line-height:1.5}
+.tasks-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:40px}
+.cta-box{background:linear-gradient(135deg,${brandColor},#3a0000);border-radius:18px;
+         padding:40px 36px;text-align:center;color:#fff;margin-bottom:40px}
+.cta-box h2{font-size:1.6rem;font-weight:900;margin-bottom:10px}
+.cta-box p{opacity:.85;font-size:.95rem;margin-bottom:24px;line-height:1.5;max-width:500px;margin-left:auto;margin-right:auto}
+footer{background:#111;color:#6b7280;padding:28px 24px;text-align:center;font-size:.8rem}
+footer a{color:#FF9000}
+.footer-links{display:flex;justify-content:center;gap:20px;margin-bottom:10px;flex-wrap:wrap}
+@media(max-width:600px){.btn-outline{margin-left:0;margin-top:10px}.hero{padding:56px 18px 48px}}
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <div class="navbar-brand">
+    ${domainInfo.logo_html || (domainInfo.logo_url ? `<img src="${esc(domainInfo.logo_url)}" alt="${siteName}" style="height:30px;object-fit:contain">` : `<span style="background:#FF9000;width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:1.1rem">🔨</span>`)}
+    <span>${siteName}</span>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center">
+    <a href="/" style="color:rgba(255,255,255,.75);font-size:.88rem;padding:7px 14px;border-radius:7px;transition:all .2s" onmouseover="this.style.background='rgba(255,255,255,.1)'" onmouseout="this.style.background='transparent'">← Home</a>
+    <a href="${esc(signupLink)}" class="nav-btn">Join Free</a>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="hero-badge">🤝 Community Contributions</div>
+  <h1>Contribute to<br><span>${esc(hostname.replace(/\.(com|net|org|io)$/, "").replace(/[-_.]/g, " "))}</span></h1>
+  <p>Help shape this community. Complete tasks, contribute skills, and earn rewards or equity through Contrib.com.</p>
+  <div>
+    <a href="${esc(contribUrl)}" target="_blank" class="btn-primary">View All Tasks on Contrib.com →</a>
+    <a href="${esc(signupLink)}"                 class="btn-outline">Join Handyman.com Free</a>
+  </div>
+</section>
+
+<div class="how-it-works">
+  <div class="how-inner">
+    <div style="text-align:center;margin-bottom:8px;font-size:.75rem;font-weight:700;color:${brandColor};text-transform:uppercase;letter-spacing:.08em">How It Works</div>
+    <h2 style="text-align:center;font-size:1.6rem;font-weight:800">Contribute &amp; Earn</h2>
+    <div class="steps">
+      <div class="step"><div class="step-num">1</div><div class="step-title">Browse Tasks</div><div class="step-desc">Find open tasks for ${esc(hostname)} or discover new opportunities on Contrib.com</div></div>
+      <div class="step"><div class="step-num">2</div><div class="step-title">Apply to Contribute</div><div class="step-desc">Submit your skills, proposal, or work sample to the task owner</div></div>
+      <div class="step"><div class="step-num">3</div><div class="step-title">Complete the Work</div><div class="step-desc">Collaborate, deliver quality work, and get it approved</div></div>
+      <div class="step"><div class="step-num">4</div><div class="step-title">Earn Rewards</div><div class="step-desc">Get paid in cash, equity, or credits — your choice</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px">
+    <div>
+      <div style="font-size:.72rem;font-weight:700;color:${brandColor};text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">
+        ${tasks.length > 0 ? `${tasks.length} Open Task${tasks.length !== 1 ? "s" : ""}` : "Discover Opportunities"}
+      </div>
+      <h2 style="font-size:1.4rem;font-weight:800">
+        ${tasks.length > 0 ? `Tasks for ${esc(hostname)}` : "Latest Tasks on Contrib.com"}
+      </h2>
+    </div>
+    <a href="${esc(contribUrl)}" target="_blank"
+       style="font-size:.85rem;font-weight:600;color:${brandColor};padding:9px 18px;
+              border-radius:8px;border:1.5px solid ${brandColor};transition:all .2s"
+       onmouseover="this.style.background='${brandColor}';this.style.color='#fff'"
+       onmouseout="this.style.background='transparent';this.style.color='${brandColor}'">
+      View All on Contrib.com →
+    </a>
+  </div>
+
+  <div class="tasks-grid">${taskCards}</div>
+
+  <div class="cta-box">
+    <h2>🚀 Ready to Contribute?</h2>
+    <p>Join thousands of contributors building startups and communities on Contrib.com. Earn equity, cash, or credits for your skills.</p>
+    <a href="${esc(contribUrl)}" target="_blank"
+       style="display:inline-block;background:#FF9000;color:#fff;padding:14px 32px;
+              border-radius:10px;font-weight:700;font-size:.95rem;margin-right:12px;transition:background .2s"
+       onmouseover="this.style.background='#e07800'" onmouseout="this.style.background='#FF9000'">
+      Start Contributing →
+    </a>
+    <a href="${esc(HANDYMAN_API)}/signup" target="_blank"
+       style="display:inline-block;background:rgba(255,255,255,.15);color:#fff;padding:14px 28px;
+              border-radius:10px;font-weight:600;font-size:.9rem;border:1px solid rgba(255,255,255,.3);transition:background .2s"
+       onmouseover="this.style.background='rgba(255,255,255,.25)'" onmouseout="this.style.background='rgba(255,255,255,.15)'">
+      Join Handyman.com
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-links">
+    <a href="/">Home</a>
+    <a href="${esc(HANDYMAN_API)}" target="_blank">Handyman.com</a>
+    <a href="${esc(contribUrl)}" target="_blank">Contrib.com</a>
+    <a href="/about">About</a>
+    <a href="/privacy">Privacy</a>
+    <a href="/terms">Terms</a>
+  </div>
+  <p>© ${year} ${siteName} · Powered by <a href="https://www.handyman.com" target="_blank">Handyman.com</a> &amp; <a href="https://vnoc.com" target="_blank">VNOC</a></p>
+</footer>
+</body></html>`;
 }
 
 // ─── Section builders ─────────────────────────────────────────────────────────
@@ -968,9 +1201,10 @@ footer a{color:var(--orange)}
 <!-- Tab bar -->
 <div class="tabs-bar">
   <div class="tabs-inner">
-    <div class="tab active" data-tab="projects">🏗️ Recent Projects</div>
-    <div class="tab" data-tab="discussions">💬 Discussions</div>
-    <div class="tab" data-tab="contractors">🔍 Find Contractors</div>
+    <div class="tab active" id="tab-projects"    onclick="switchTab('projects')"   >🏗️ Recent Projects</div>
+    <div class="tab"        id="tab-discussions" onclick="switchTab('discussions')" >💬 Discussions</div>
+    <div class="tab"        id="tab-contractors" onclick="switchTab('contractors')" >🔍 Find Contractors</div>
+    <a href="/contribute" class="tab" style="text-decoration:none">🤝 Contribute</a>
   </div>
 </div>
 
@@ -1242,21 +1476,22 @@ ${relatedSectionHtml}
 </footer>
 
 <script>
-// Tab switching
-document.querySelectorAll('.tab[data-tab]').forEach(function(tab) {
-  tab.addEventListener('click', function() {
-    var target = this.getAttribute('data-tab');
-    // Update tab active state
-    document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
-    this.classList.add('active');
-    // Show/hide panels
-    document.querySelectorAll('.tab-panel').forEach(function(p){ p.style.display = 'none'; });
-    var panel = document.getElementById('panel-' + target);
-    if (panel) { panel.style.display = 'block'; }
-    // Scroll to content area
-    document.querySelector('.content').scrollIntoView({ behavior: 'smooth', block: 'start' });
+// Tab switching — global function, called directly via onclick attributes
+function switchTab(name) {
+  // Update tab highlights
+  ['projects','discussions','contractors'].forEach(function(t) {
+    var el = document.getElementById('tab-' + t);
+    if (el) el.classList.toggle('active', t === name);
   });
-});
+  // Show/hide panels
+  ['projects','discussions','contractors'].forEach(function(t) {
+    var p = document.getElementById('panel-' + t);
+    if (p) p.style.display = (t === name) ? 'block' : 'none';
+  });
+  // Smooth scroll to content
+  var content = document.querySelector('.content');
+  if (content) content.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 // Contractor search
 function searchContractors() {
