@@ -535,7 +535,15 @@ function renderContributePage(hostname, domainInfo, tasks, HANDYMAN_API, signupL
   const taskCards = tasks.length
     ? tasks.map(t => {
         const title   = esc((t.title ?? t.task_name ?? t.name ?? "Task").slice(0, 70));
-        const desc    = esc((t.description ?? t.desc ?? "").slice(0, 120));
+        const rawDesc = (t.description ?? t.desc ?? "")
+          .replace(/<[^>]*>/g, " ")          // strip HTML tags
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/\s+/g, " ")
+          .trim();
+        const desc    = esc(rawDesc.slice(0, 120));
         const reward  = t.reward ?? t.pay ?? t.equity ?? null;
         const type    = esc(t.type ?? t.category ?? t.task_type ?? "Task");
         const taskUrl = t.url ?? `${contribUrl}`;
@@ -551,7 +559,7 @@ function renderContributePage(hostname, domainInfo, tasks, HANDYMAN_API, signupL
             <span style="background:#f0f4ff;color:#3730a3;font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:100px;text-transform:uppercase;letter-spacing:.05em">${type}</span>
             <span style="background:${badgeColor};color:${badgeText};font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:100px;margin-left:6px">${esc(status)}</span>
           </div>
-          ${reward ? `<div style="font-weight:800;color:${brandColor};font-size:.95rem;white-space:nowrap">${esc(String(reward))}</div>` : ""}
+          ${reward ? `<div style="font-weight:800;color:${brandColor};font-size:.95rem;white-space:nowrap">${esc(String(reward).replace(/\b1 hrs\b/, "1 hr"))}</div>` : ""}
         </div>
         <div style="font-weight:700;font-size:1rem;margin-bottom:6px;line-height:1.3">${title}</div>
         ${desc ? `<div style="font-size:.83rem;color:#6b7280;line-height:1.5;margin-bottom:14px">${desc}${(t.description ?? "").length > 120 ? "…" : ""}</div>` : ""}
