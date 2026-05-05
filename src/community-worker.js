@@ -1,0 +1,1033 @@
+/**
+ * Handyman Community Lander — CF Worker (runtime-dynamic, no placeholders)
+ * Vertical: Handyman | Worker: handyman-community
+ *
+ * All values resolved at request time from:
+ *   env.HANDYMAN_API_URL, env.WORKER_API_KEY,
+ *   VNOC workerinfo API, hostname detection
+ */
+
+const CACHE_TTL           = 15 * 60;            // 15 min — projects / questions
+const CACHE_TTL_DOMAIN    = 60 * 60;            // 60 min — VNOC domain info
+const CACHE_TTL_AFFILIATE = 60 * 60 * 24 * 30; // 30 days — affiliate ref_id
+const BRAND_COLOR_DEFAULT = "#670708";
+const ACCENT_COLOR        = "#FF9000";
+const HANDYMAN_LOGO_URL   = "https://www.handyman.com/logo.png";
+const VNOC_API_URL        = "https://manage.vnoc.com";
+const VNOC_API_KEY        = "b102e32a4bf14b575f352186e265ed7c7272cde4ded39f0c478530f6b358c9c4";
+
+// Default partner network — shown when VNOC API returns no partners
+// Logo: use each domain's own logo path; fallback to Google favicon service
+const DEFAULT_PARTNERS = [
+  { domain: "handyman.com",    url: "https://www.handyman.com",    description: "Find trusted handymen & contractors",    logo_url: "https://www.handyman.com/logo.png" },
+  { domain: "vnoc.com",        url: "https://www.vnoc.com",        description: "Domain portfolio management platform",   logo_url: "https://www.vnoc.com/images/logo.png" },
+  { domain: "ventureos.com",   url: "https://www.ventureos.com",   description: "AI-powered venture operating system",    logo_url: "https://www.ventureos.com/logo.png" },
+  { domain: "contrib.com",     url: "https://www.contrib.com",     description: "Startup equity & contribution platform", logo_url: "https://www.contrib.com/images/logo.png" },
+  { domain: "referrals.com",   url: "https://www.referrals.com",   description: "Referral marketing made simple",         logo_url: "https://www.referrals.com/logo.png" },
+  { domain: "agentdao.com",    url: "https://www.agentdao.com",    description: "Decentralized AI agent marketplace",     logo_url: "https://www.agentdao.com/logo.png" },
+  { domain: "paydirect.com",   url: "https://www.paydirect.com",   description: "Direct payment solutions",               logo_url: "https://www.paydirect.com/logo.png" },
+  { domain: "agentbank.com",   url: "https://www.agentbank.com",   description: "Banking for AI agents",                  logo_url: "https://www.agentbank.com/logo.png" },
+  { domain: "veganist.com",    url: "https://www.veganist.com",    description: "Vegan lifestyle & community",            logo_url: "https://www.veganist.com/logo.png" },
+];
+
+export default {
+  async fetch(request, env) {
+    const url      = new URL(request.url);
+    const hostname = url.hostname.replace(/^www\./, "");
+    const HANDYMAN_API = (env.HANDYMAN_API_URL ?? "https://www.handyman.com").replace(/\/$/, "");
+    const WORKER_KEY   = env.WORKER_API_KEY ?? "";
+
+    // Static routes
+    if (url.pathname === "/robots.txt") {
+      return new Response(
+        `User-agent: *\nAllow: /\nSitemap: https://${hostname}/sitemap.xml`,
+        { headers: { "Content-Type": "text/plain" } }
+      );
+    }
+    if (url.pathname === "/sitemap.xml") {
+      return new Response(
+        `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://${hostname}/</loc><changefreq>hourly</changefreq></url></urlset>`,
+        { headers: { "Content-Type": "application/xml" } }
+      );
+    }
+
+    // Fetch domain info, affiliate ID, and content in parallel
+    const [domainInfo, refId, projects, questions, contractors] = await Promise.all([
+      fetchDomainInfo(hostname, env),
+      getOrRegisterAffiliate(hostname, HANDYMAN_API, WORKER_KEY, env),
+      fetchProjects(HANDYMAN_API, env),
+      fetchQuestions(HANDYMAN_API, env),
+      fetchContractors(HANDYMAN_API, env),
+    ]);
+
+    if (url.pathname === "/.well-known/agent.json") {
+      return Response.json({
+        name:        domainInfo.site_name,
+        domain:      hostname,
+        vertical:    "Handyman",
+        hub:         HANDYMAN_API,
+        description: domainInfo.tagline,
+        network:     "Handyman Partner Network",
+      });
+    }
+
+    const signupLink = refId
+      ? `${HANDYMAN_API}/signup?ref=${refId}&refType=contractor`
+      : `${HANDYMAN_API}/signup`;
+    const referLink = `${HANDYMAN_API}/refer/${hostname.replace(/\./g, "-")}`;
+
+    const html = renderPage({
+      hostname,
+      domainInfo,
+      signupLink,
+      referLink,
+      projects,
+      questions,
+      contractors,
+      HANDYMAN_API,
+    });
+
+    return new Response(html, {
+      headers: {
+        "Content-Type":  "text/html;charset=UTF-8",
+        "Cache-Control": "public, max-age=180",
+      },
+    });
+  },
+};
+
+// ─── VNOC domain info ────────────────────────────────────────────────────────
+
+async function fetchDomainInfo(hostname, env) {
+  const DEFAULT = {
+    site_name:       "Handyman Community",
+    tagline:         "Real Projects. Real Answers. Find trusted contractors near you.",
+    logo_url:        "",
+    logo_html:       "",
+    partner_domains: DEFAULT_PARTNERS,  // [{ domain, url, description, logo_url }]
+    related_domains: [],                // [{ domain, url }] or [string]
+    brand_color:     BRAND_COLOR_DEFAULT,
+  };
+
+  try {
+    const cacheKey = `vnoc:info:${hostname}`;
+    if (env.CACHE) {
+      const cached = await env.CACHE.get(cacheKey);
+      if (cached) return { ...DEFAULT, ...JSON.parse(cached) };
+    }
+
+    const apiKey = env.VNOC_API_KEY ?? VNOC_API_KEY;
+    const res = await fetch(
+      `${VNOC_API_URL}/v2/domainsite/workerinfo?domain=${encodeURIComponent(hostname)}&key=${apiKey}`,
+      { headers: { Accept: "application/json" }, cf: { cacheTtl: 0 } }
+    );
+
+    if (res.ok) {
+      const raw  = await res.json();
+      const data = raw.data ?? raw;
+
+      // Normalize partner_domains — accept array of objects or strings
+      const rawPartners = data.partner_domains ?? data.partners ?? [];
+      const partnerDomains = rawPartners.map(p =>
+        typeof p === "string"
+          ? { domain: p, url: `https://${p}`, description: "", logo_url: "" }
+          : { domain: p.domain ?? p.name ?? "", url: p.url ?? `https://${p.domain ?? ""}`, description: p.description ?? "", logo_url: p.logo_url ?? p.logo ?? "" }
+      ).filter(p => p.domain);
+
+      // Normalize related_domains — keep separate from partners
+      const rawRelated = data.related_domains ?? data.siblings ?? [];
+      const relatedDomains = rawRelated.map(r =>
+        typeof r === "string"
+          ? { domain: r, url: `https://${r}` }
+          : { domain: r.domain ?? r.name ?? "", url: r.url ?? `https://${r.domain ?? ""}` }
+      ).filter(r => r.domain);
+
+      const info = {
+        site_name:       data.site_name  ?? data.title       ?? titleCase(hostname),
+        tagline:         data.tagline    ?? data.description  ?? DEFAULT.tagline,
+        logo_url:        data.logo_url   ?? data.logo         ?? "",
+        logo_html:       data.logo_html  ?? "",
+        // Fall back to DEFAULT_PARTNERS when API returns no partner domains
+        partner_domains: partnerDomains.length ? partnerDomains : DEFAULT_PARTNERS,
+        related_domains: relatedDomains,
+        brand_color:     data.vertical_color ?? data.brand_color ?? BRAND_COLOR_DEFAULT,
+      };
+
+      if (env.CACHE) {
+        await env.CACHE.put(cacheKey, JSON.stringify(info), { expirationTtl: CACHE_TTL_DOMAIN });
+      }
+      return info;
+    }
+  } catch (_) {}
+
+  return { ...DEFAULT, site_name: titleCase(hostname) };
+}
+
+// ─── Affiliate registration ───────────────────────────────────────────────────
+
+async function getOrRegisterAffiliate(hostname, HANDYMAN_API, WORKER_KEY, env) {
+  if (!env.CACHE) return null;
+  const key    = `affiliate:${hostname}`;
+  const cached = await env.CACHE.get(key);
+  if (cached) return parseInt(cached, 10);
+
+  try {
+    const res = await fetch(`${HANDYMAN_API}/api/affiliate/register-domain`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ domain: hostname, apiKey: WORKER_KEY }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.ref_id) {
+        await env.CACHE.put(key, String(data.ref_id), { expirationTtl: CACHE_TTL_AFFILIATE });
+        return data.ref_id;
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+// ─── Handyman API fetches ─────────────────────────────────────────────────────
+
+async function fetchProjects(HANDYMAN_API, env) {
+  if (env.CACHE) {
+    const c = await env.CACHE.get("hm:projects");
+    if (c) return JSON.parse(c);
+  }
+  try {
+    const res = await fetch(`${HANDYMAN_API}/api/public/projects?limit=6`);
+    if (res.ok) {
+      const data = await res.json();
+      const list = data.projects ?? data ?? [];
+      if (env.CACHE) await env.CACHE.put("hm:projects", JSON.stringify(list), { expirationTtl: CACHE_TTL });
+      return list;
+    }
+  } catch (_) {}
+  return [];
+}
+
+async function fetchQuestions(HANDYMAN_API, env) {
+  if (env.CACHE) {
+    const c = await env.CACHE.get("hm:questions");
+    if (c) return JSON.parse(c);
+  }
+  try {
+    const res = await fetch(`${HANDYMAN_API}/api/public/questions?limit=8`);
+    if (res.ok) {
+      const data = await res.json();
+      const list = data.questions ?? data ?? [];
+      if (env.CACHE) await env.CACHE.put("hm:questions", JSON.stringify(list), { expirationTtl: CACHE_TTL });
+      return list;
+    }
+  } catch (_) {}
+  return [];
+}
+
+async function fetchContractors(HANDYMAN_API, env) {
+  if (env.CACHE) {
+    const c = await env.CACHE.get("hm:contractors");
+    if (c) return JSON.parse(c);
+  }
+  try {
+    const res = await fetch(`${HANDYMAN_API}/api/public/contractors?limit=6`);
+    if (res.ok) {
+      const data = await res.json();
+      const list = data.contractors ?? data ?? [];
+      if (env.CACHE) await env.CACHE.put("hm:contractors", JSON.stringify(list), { expirationTtl: CACHE_TTL });
+      return list;
+    }
+  } catch (_) {}
+  return [];
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function titleCase(hostname) {
+  return hostname
+    .replace(/\.(com|net|org|io|co)$/, "")
+    .replace(/[-_.]/g, " ")
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function timeAgo(dateStr) {
+  try {
+    const ms = Date.now() - new Date(dateStr).getTime();
+    const m  = Math.floor(ms / 60000);
+    if (m < 60)   return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24)   return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  } catch { return ""; }
+}
+
+// ─── Section builders ─────────────────────────────────────────────────────────
+
+function buildPartnerSection(partners, HANDYMAN_API, refSlug) {
+  if (!partners || partners.length === 0) return "";
+
+  const cards = partners.map(p => {
+    // Logo with fallback chain: domain logo → Google favicon → letter avatar
+    const faviconUrl = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(p.domain)}&sz=64`;
+    const letterAvatar = `<div style="width:40px;height:40px;background:var(--brand);border-radius:9px;
+                    display:flex;align-items:center;justify-content:center;
+                    color:#fff;font-weight:800;font-size:1.1rem;margin-bottom:8px;flex-shrink:0">
+           ${esc(p.domain.charAt(0).toUpperCase())}
+         </div>`;
+    const logoHtml = p.logo_url
+      ? `<img src="${esc(p.logo_url)}" alt="${esc(p.domain)}"
+              style="height:32px;max-width:120px;object-fit:contain;margin-bottom:8px"
+              onerror="this.onerror=null;this.src='${faviconUrl}';this.style.height='32px';this.style.width='32px'">`
+      : `<img src="${esc(faviconUrl)}" alt="${esc(p.domain)}"
+              style="height:32px;width:32px;object-fit:contain;margin-bottom:8px"
+              onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`;
+    const desc = p.description
+      ? `<p style="font-size:.75rem;color:var(--muted);margin:4px 0 0;line-height:1.4">${esc(p.description.slice(0, 60))}${p.description.length > 60 ? "…" : ""}</p>`
+      : "";
+    return `
+    <a href="${esc(p.url)}" class="partner-card" target="_blank" rel="noopener">
+      ${logoHtml}
+      <div style="font-size:.82rem;font-weight:700;color:var(--text)">${esc(p.domain)}</div>
+      ${desc}
+      <div style="margin-top:8px;font-size:.72rem;color:var(--brand);font-weight:600">Visit Site →</div>
+    </a>`;
+  }).join("");
+
+  return `
+<section class="partners-section">
+  <div class="section-inner">
+    <div class="section-header">
+      <div>
+        <div class="section-eyebrow">🤝 Network</div>
+        <h2 class="section-title">Partner Sites</h2>
+      </div>
+      <a href="${esc(HANDYMAN_API)}/partners" class="section-link">View All Partners →</a>
+    </div>
+    <div class="partners-grid">${cards}</div>
+  </div>
+</section>`;
+}
+
+function buildRelatedSection(related) {
+  if (!related || related.length === 0) return "";
+
+  const tags = related.map(r => {
+    const domain = typeof r === "string" ? r : (r.domain ?? "");
+    const url    = typeof r === "string" ? `https://${r}` : (r.url ?? `https://${r.domain ?? ""}`);
+    return domain
+      ? `<a href="${esc(url)}" class="rel-tag" target="_blank" rel="noopener">${esc(domain)}</a>`
+      : "";
+  }).filter(Boolean).join("");
+
+  if (!tags) return "";
+
+  return `
+<section class="related-section">
+  <div class="section-inner">
+    <div class="section-header">
+      <div>
+        <div class="section-eyebrow">🔗 Discover</div>
+        <h2 class="section-title">Related Domains</h2>
+      </div>
+    </div>
+    <div class="rel-tags">${tags}</div>
+  </div>
+</section>`;
+}
+
+function buildHandymanSection(HANDYMAN_API, signupLink) {
+  const features = [
+    { icon: "🔨", title: "5,000+ Verified Pros",   desc: "Vetted, reviewed handymen in your area" },
+    { icon: "📋", title: "Post a Project",          desc: "Get quotes from multiple contractors" },
+    { icon: "💬", title: "Community Q&A",           desc: "Real answers from real homeowners & pros" },
+    { icon: "⭐", title: "Trusted Reviews",          desc: "Honest ratings from real customers" },
+    { icon: "💰", title: "Earn Referral Credits",   desc: "Refer a contractor, earn when they sign up" },
+    { icon: "🛠️", title: "All Home Services",       desc: "Plumbing, electrical, roofing & more" },
+  ];
+
+  const featureCards = features.map(f => `
+    <div class="hm-feature">
+      <div class="hm-feature-icon">${f.icon}</div>
+      <div>
+        <div style="font-weight:700;font-size:.9rem;margin-bottom:3px">${f.title}</div>
+        <div style="font-size:.78rem;color:var(--muted)">${f.desc}</div>
+      </div>
+    </div>`).join("");
+
+  return `
+<section class="handyman-section">
+  <div class="section-inner">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center">
+
+      <!-- Left: copy -->
+      <div>
+        <div class="section-eyebrow" style="color:var(--orange)">🏠 The Platform</div>
+        <h2 style="font-size:clamp(1.6rem,3vw,2.4rem);font-weight:900;line-height:1.15;margin:10px 0 14px">
+          Everything Home Improvement<br>in One Place
+        </h2>
+        <p style="color:var(--muted);font-size:.95rem;line-height:1.6;margin-bottom:24px;max-width:400px">
+          Handyman.com connects homeowners with trusted, vetted contractors.
+          Post projects, get quotes, read community answers — all free.
+        </p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <a href="${esc(signupLink)}"
+             style="background:var(--brand);color:#fff;padding:13px 28px;border-radius:9px;
+                    font-weight:700;font-size:.9rem;transition:background .2s"
+             onmouseover="this.style.background='#4a0505'"
+             onmouseout="this.style.background='var(--brand)'">Join Free →</a>
+          <a href="${esc(HANDYMAN_API)}/contractors"
+             style="background:#fff;color:var(--brand);padding:13px 28px;border-radius:9px;
+                    font-weight:700;font-size:.9rem;border:2px solid var(--brand);transition:all .2s"
+             onmouseover="this.style.background='var(--brand)';this.style.color='#fff'"
+             onmouseout="this.style.background='#fff';this.style.color='var(--brand)'">Find Contractors</a>
+        </div>
+      </div>
+
+      <!-- Right: feature grid -->
+      <div class="hm-features-grid">${featureCards}</div>
+
+    </div>
+  </div>
+</section>`;
+}
+
+// ─── Page renderer ────────────────────────────────────────────────────────────
+
+function renderPage({ hostname, domainInfo, signupLink, referLink, projects, questions, contractors, HANDYMAN_API }) {
+  const year       = new Date().getFullYear();
+  const brandColor = domainInfo.brand_color ?? BRAND_COLOR_DEFAULT;
+  const siteName   = esc(domainInfo.site_name);
+  const metaDesc   = esc(domainInfo.tagline);
+  const refSlug    = hostname.replace(/\./g, "-");
+
+  // Section HTML
+  const partnerSectionHtml = buildPartnerSection(domainInfo.partner_domains, HANDYMAN_API, refSlug);
+  const relatedSectionHtml = buildRelatedSection(domainInfo.related_domains);
+  const handymanSectionHtml = buildHandymanSection(HANDYMAN_API, signupLink);
+
+  // Project cards
+  const typeColors = {
+    Plumbing:   "#0369a1",
+    Electrical: "#b45309",
+    Roofing:    "#166534",
+    Painting:   "#7c3aed",
+    HVAC:       "#0891b2",
+    General:    "#6b7280",
+  };
+
+  const projectCards = projects.length
+    ? projects.map(p => {
+        const typeName = p.projectType ?? p.project_type ?? "General";
+        const tColor   = typeColors[typeName] ?? "#6b7280";
+        const ago      = timeAgo(p.date_added ?? p.createdAt ?? "");
+        const loc      = [p.city, p.state].filter(Boolean).join(", ");
+        const detailUrl = `${HANDYMAN_API}/projects/${p.project_id ?? p.id}?ref=${refSlug}`;
+        return `
+        <a href="${esc(detailUrl)}" class="project-card" target="_blank" rel="noopener">
+          <div class="project-type" style="color:${tColor};background:${tColor}18">${esc(typeName)}</div>
+          <div class="project-title">${esc((p.description ?? p.title ?? "Untitled Project").slice(0, 80))}</div>
+          <div class="project-meta">
+            ${loc  ? `<span>📍 ${esc(loc)}</span>`   : ""}
+            ${ago  ? `<span>🕐 ${ago}</span>`         : ""}
+            ${p.budget ? `<span>💰 ${esc(p.budget)}</span>` : ""}
+          </div>
+        </a>`;
+      }).join("")
+    : `<div class="empty-state">
+        <div style="font-size:2.5rem">🏗️</div>
+        <h3>No Projects Yet</h3>
+        <p>Be the first to post a project in your area.</p>
+        <a href="${esc(HANDYMAN_API)}/projects/post" class="btn-empty">Post a Project →</a>
+      </div>`;
+
+  // Question cards
+  const questionCards = questions.length
+    ? questions.map(q => {
+        const votes   = q.votes ?? 0;
+        const answers = q.answer_count ?? 0;
+        const qUrl    = `${HANDYMAN_API}/questions/${q.question_id ?? q.id}?ref=${refSlug}`;
+        const ago     = timeAgo(q.date_posted ?? "");
+        const preview = (q.title ?? q.question_text ?? q.content ?? "").slice(0, 95);
+        return `
+        <a href="${esc(qUrl)}" class="q-card" target="_blank" rel="noopener">
+          <div class="q-votes">
+            <div class="q-vote-num">${votes}</div>
+            <div class="q-vote-lbl">votes</div>
+          </div>
+          <div class="q-body">
+            <div class="q-title">${esc(preview)}${preview.length >= 95 ? "…" : ""}</div>
+            <div class="q-meta">
+              ${answers > 0
+                ? `<span class="q-answered">✓ ${answers} answer${answers !== 1 ? "s" : ""}</span>`
+                : `<span class="q-unanswered">Unanswered</span>`}
+              ${ago ? `<span class="q-time">${ago}</span>` : ""}
+            </div>
+          </div>
+          <div class="q-arrow">›</div>
+        </a>`;
+      }).join("")
+    : `<div class="empty-state">
+        <div style="font-size:2.5rem">💬</div>
+        <h3>Be First to Ask</h3>
+        <p>Have a home improvement question? Our community has answers.</p>
+        <a href="${esc(HANDYMAN_API)}/questions" class="btn-empty">Ask a Question →</a>
+      </div>`;
+
+  // Service tags in sidebar
+  const serviceTags = ["Plumbing","Electrical","Roofing","Painting","HVAC","Landscaping","Bathrooms","Windows"]
+    .map(s => `<a href="${esc(HANDYMAN_API)}/services/${s.toLowerCase()}?ref=${refSlug}"
+         class="svc-tag">${s}</a>`)
+    .join("");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${siteName} — Projects &amp; Community</title>
+<meta name="description" content="${metaDesc}">
+<meta property="og:title" content="${siteName} — Projects &amp; Community">
+<meta property="og:description" content="${metaDesc}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+:root{
+  --brand:${brandColor};
+  --orange:${ACCENT_COLOR};
+  --bg:#f5f4f2;
+  --card-bg:#fff;
+  --text:#1a1a1a;
+  --muted:#6b7280;
+  --border:#e5e7eb;
+  --radius:14px;
+  --shadow:0 2px 16px rgba(0,0,0,.07);
+  --shadow-lg:0 6px 32px rgba(0,0,0,.12);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+a{text-decoration:none;color:inherit}
+
+/* Navbar */
+.navbar{position:sticky;top:0;z-index:100;background:rgba(103,7,8,.97);backdrop-filter:blur(12px);
+        border-bottom:1px solid rgba(255,255,255,.08);padding:0 24px;height:64px;
+        display:flex;align-items:center;justify-content:space-between}
+.navbar-brand{display:flex;align-items:center;gap:10px;color:#fff;font-size:1.1rem;font-weight:700}
+.navbar-brand .icon{width:34px;height:34px;background:var(--orange);border-radius:8px;
+                    display:flex;align-items:center;justify-content:center;font-size:1.1rem}
+.nav-actions{display:flex;gap:10px;align-items:center}
+.nav-link{color:rgba(255,255,255,.75);font-size:.88rem;font-weight:500;padding:7px 14px;border-radius:7px;transition:all .2s}
+.nav-link:hover{color:#fff;background:rgba(255,255,255,.1)}
+.nav-btn{background:var(--orange);color:#fff;padding:9px 22px;border-radius:8px;
+         font-weight:600;font-size:.88rem;white-space:nowrap;transition:background .2s}
+.nav-btn:hover{background:#e07800}
+
+/* Hero */
+.hero{background:var(--brand);padding:80px 24px 0;text-align:center;overflow:hidden}
+.hero-badge{display:inline-flex;align-items:center;gap:6px;
+            background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);
+            color:rgba(255,255,255,.9);padding:6px 16px;border-radius:100px;
+            font-size:.8rem;font-weight:500;margin-bottom:18px}
+.hero h1{font-size:clamp(1.9rem,4.5vw,3.2rem);font-weight:900;color:#fff;
+         line-height:1.1;letter-spacing:-.02em;margin-bottom:14px;
+         max-width:700px;margin-left:auto;margin-right:auto}
+.hero h1 span{color:var(--orange)}
+.hero p{color:rgba(255,255,255,.8);font-size:1rem;max-width:500px;margin:0 auto 28px}
+.hero-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:40px}
+.btn-hero-p{background:var(--orange);color:#fff;padding:14px 32px;border-radius:10px;
+            font-weight:700;font-size:.95rem;box-shadow:0 4px 20px rgba(255,144,0,.4);transition:all .2s}
+.btn-hero-p:hover{background:#e07800;transform:translateY(-1px)}
+.btn-hero-s{background:rgba(255,255,255,.12);color:#fff;padding:14px 32px;border-radius:10px;
+            font-weight:600;font-size:.95rem;border:1px solid rgba(255,255,255,.25);transition:all .2s}
+.btn-hero-s:hover{background:rgba(255,255,255,.2)}
+
+/* Tabs */
+.tabs-bar{background:#fff;border-bottom:1px solid var(--border);position:sticky;top:64px;z-index:90}
+.tabs-inner{max-width:1100px;margin:0 auto;padding:0 24px;display:flex;gap:4px}
+.tab{padding:14px 20px;font-weight:600;font-size:.88rem;color:var(--muted);
+     border-bottom:3px solid transparent;cursor:pointer;transition:all .2s;white-space:nowrap}
+.tab.active{color:var(--brand);border-bottom-color:var(--brand)}
+.tab:hover{color:var(--brand)}
+
+/* Layout */
+.content{max-width:1100px;margin:0 auto;padding:40px 24px;
+         display:grid;grid-template-columns:1fr 340px;gap:28px;align-items:start}
+
+/* Project cards */
+.projects-list{display:flex;flex-direction:column;gap:14px}
+.project-card{background:var(--card-bg);border-radius:var(--radius);box-shadow:var(--shadow);
+              padding:20px 22px;transition:all .25s;border:1px solid var(--border);display:block}
+.project-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:#ddd}
+.project-type{display:inline-block;font-size:.72rem;font-weight:700;padding:3px 10px;
+              border-radius:100px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em}
+.project-title{font-size:.95rem;font-weight:600;color:var(--text);margin-bottom:10px;line-height:1.4}
+.project-meta{display:flex;gap:14px;flex-wrap:wrap}
+.project-meta span{font-size:.78rem;color:var(--muted)}
+
+/* Q cards */
+.questions-list{display:flex;flex-direction:column;gap:2px;background:var(--card-bg);
+                border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;
+                border:1px solid var(--border)}
+.q-card{display:flex;align-items:center;gap:14px;padding:16px 18px;
+        border-bottom:1px solid var(--border);transition:background .2s;cursor:pointer}
+.q-card:last-child{border-bottom:none}
+.q-card:hover{background:#fafafa}
+.q-votes{min-width:48px;text-align:center}
+.q-vote-num{font-size:1.1rem;font-weight:800;color:var(--brand)}
+.q-vote-lbl{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.q-body{flex:1;min-width:0}
+.q-title{font-size:.88rem;font-weight:600;color:var(--text);line-height:1.4;margin-bottom:5px}
+.q-meta{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.q-answered{background:#dcfce7;color:#166534;font-size:.7rem;font-weight:600;padding:2px 8px;border-radius:100px}
+.q-unanswered{background:#fef3c7;color:#92400e;font-size:.7rem;font-weight:600;padding:2px 8px;border-radius:100px}
+.q-time{font-size:.72rem;color:var(--muted)}
+.q-arrow{color:var(--muted);font-size:1.3rem;font-weight:300}
+
+/* Sidebar */
+.sidebar{display:flex;flex-direction:column;gap:18px}
+.sidebar-card{background:var(--card-bg);border-radius:var(--radius);box-shadow:var(--shadow);
+              padding:22px;border:1px solid var(--border)}
+.sidebar-title{font-size:.85rem;font-weight:700;color:var(--text);
+               text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}
+.cta-sidebar{background:linear-gradient(135deg,var(--brand),#3a0000);color:#fff;
+             border-radius:var(--radius);padding:24px;text-align:center}
+.cta-sidebar h3{font-size:1.05rem;font-weight:700;margin-bottom:8px}
+.cta-sidebar p{font-size:.82rem;opacity:.85;margin-bottom:16px;line-height:1.4}
+.btn-sidebar{display:block;background:var(--orange);color:#fff;padding:11px 20px;
+             border-radius:8px;font-weight:700;font-size:.85rem;text-align:center;transition:background .2s}
+.btn-sidebar:hover{background:#e07800}
+.stat-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
+.stat-row:last-child{border-bottom:none}
+.stat-row-lbl{font-size:.82rem;color:var(--muted)}
+.stat-row-val{font-size:.82rem;font-weight:700;color:var(--text)}
+.ask-btn{display:block;background:var(--brand);color:#fff;padding:11px 20px;border-radius:8px;
+         font-weight:700;font-size:.85rem;text-align:center;transition:background .2s;margin-bottom:10px}
+.ask-btn:hover{background:#4a0505}
+.post-btn{display:block;background:var(--orange);color:#fff;padding:11px 20px;border-radius:8px;
+          font-weight:700;font-size:.85rem;text-align:center;transition:background .2s}
+.post-btn:hover{background:#e07800}
+.svc-tag{background:#f5f4f2;color:var(--muted);padding:5px 12px;border-radius:100px;
+         font-size:.75rem;font-weight:500;border:1px solid var(--border);
+         display:inline-block;margin:3px;transition:all .2s}
+.svc-tag:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
+
+/* Contractor cards in Find Contractors panel */
+.ctr-card{background:var(--card-bg);border:1.5px solid var(--border);border-radius:12px;
+          padding:16px 18px;transition:all .25s;display:block}
+.ctr-card:hover{border-color:var(--brand);box-shadow:var(--shadow-lg);transform:translateY(-2px)}
+
+/* Empty state */
+.empty-state{background:var(--card-bg);border-radius:var(--radius);padding:40px;
+             text-align:center;border:2px dashed var(--border)}
+.empty-state h3{font-size:1rem;font-weight:700;margin:10px 0 6px}
+.empty-state p{font-size:.85rem;color:var(--muted);margin-bottom:16px}
+.btn-empty{display:inline-block;background:var(--brand);color:#fff;padding:9px 20px;
+           border-radius:7px;font-size:.85rem;font-weight:600}
+
+/* Refer banner */
+.refer-section{background:#fff;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.refer-inner{max-width:1100px;margin:0 auto;padding:48px 24px;
+             display:flex;align-items:center;justify-content:space-between;gap:28px;flex-wrap:wrap}
+.refer-text h2{font-size:1.4rem;font-weight:800;margin-bottom:8px}
+.refer-text p{color:var(--muted);max-width:440px;font-size:.9rem}
+.refer-action{display:flex;flex-direction:column;gap:8px;min-width:220px}
+.btn-refer{background:var(--brand);color:#fff;padding:12px 28px;border-radius:9px;
+           font-weight:700;font-size:.9rem;text-align:center;transition:all .2s}
+.btn-refer:hover{background:#4a0505}
+
+/* Section shared styles */
+.section-inner{max-width:1100px;margin:0 auto;padding:56px 24px}
+.section-header{display:flex;align-items:flex-end;justify-content:space-between;
+                margin-bottom:28px;flex-wrap:wrap;gap:12px}
+.section-eyebrow{font-size:.72rem;font-weight:700;color:var(--brand);
+                 text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+.section-title{font-size:1.6rem;font-weight:800;line-height:1.15}
+.section-link{font-size:.85rem;font-weight:600;color:var(--brand);
+              padding:8px 16px;border-radius:7px;border:1px solid var(--brand);transition:all .2s}
+.section-link:hover{background:var(--brand);color:#fff}
+
+/* Partner domains section */
+.partners-section{background:#fff;border-top:1px solid var(--border)}
+.partners-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:16px}
+.partner-card{background:#f9f9f9;border:1px solid var(--border);border-radius:12px;
+              padding:18px 16px;transition:all .25s;display:flex;flex-direction:column}
+.partner-card:hover{transform:translateY(-3px);box-shadow:var(--shadow-lg);
+                    border-color:var(--brand);background:#fff}
+
+/* Related domains section */
+.related-section{background:var(--bg);border-top:1px solid var(--border)}
+.rel-tags{display:flex;flex-wrap:wrap;gap:8px}
+.rel-tag{background:#fff;border:1px solid var(--border);color:var(--muted);
+         padding:7px 16px;border-radius:100px;font-size:.82rem;font-weight:500;transition:all .2s}
+.rel-tag:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
+
+/* Handyman.com section */
+.handyman-section{background:linear-gradient(135deg,#fdf6f0 0%,#fff 60%,#fdf0f0 100%);
+                  border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.hm-features-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.hm-feature{display:flex;align-items:flex-start;gap:12px;
+            background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px}
+.hm-feature-icon{font-size:1.4rem;flex-shrink:0;margin-top:2px}
+
+/* Footer */
+footer{background:#111;color:#6b7280;padding:28px 24px;text-align:center;font-size:.8rem}
+footer a{color:var(--orange)}
+.footer-links{display:flex;justify-content:center;gap:20px;margin-bottom:10px;flex-wrap:wrap}
+
+@media(max-width:860px){
+  .content{grid-template-columns:1fr}
+  .sidebar{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .hm-features-grid{grid-template-columns:1fr}
+  .handyman-section .section-inner > div{grid-template-columns:1fr!important}
+}
+@media(max-width:600px){
+  .hero{padding:56px 18px 0}
+  .tabs-inner{gap:0;overflow-x:auto}
+  .navbar .nav-link{display:none}
+  .refer-inner{flex-direction:column;text-align:center}
+  .refer-action{width:100%}
+  .sidebar{grid-template-columns:1fr}
+  .partners-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+}
+</style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar">
+  <div class="navbar-brand">
+    ${domainInfo.logo_html
+      ? domainInfo.logo_html
+      : domainInfo.logo_url
+        ? `<img src="${esc(domainInfo.logo_url)}" alt="${siteName}" style="height:32px;object-fit:contain">`
+        : `<div class="icon">🔨</div>`}
+    <span>${siteName}</span>
+  </div>
+  <div class="nav-actions">
+    <a href="${esc(HANDYMAN_API)}/contractors" class="nav-link">Find Pros</a>
+    <a href="${esc(HANDYMAN_API)}/questions"   class="nav-link">Community</a>
+    <a href="${esc(signupLink)}"               class="nav-btn">Join Free</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-badge">💬 Active Community · Real Projects</div>
+  <h1>Real Projects.<br><span>Real Answers.</span></h1>
+  <p>Browse live home improvement projects, read community Q&amp;A, and connect with top-rated contractors.</p>
+  <div class="hero-btns">
+    <a href="${esc(HANDYMAN_API)}/projects/post" class="btn-hero-p">Post a Project →</a>
+    <a href="${esc(signupLink)}"                 class="btn-hero-s">Join Free</a>
+  </div>
+</section>
+<svg viewBox="0 0 1440 40" xmlns="http://www.w3.org/2000/svg"
+     style="display:block;background:var(--brand)">
+  <path d="M0,40 C360,0 1080,0 1440,40 L1440,0 L0,0 Z" fill="${brandColor}"/>
+</svg>
+
+<!-- Tab bar -->
+<div class="tabs-bar">
+  <div class="tabs-inner">
+    <div class="tab active" data-tab="projects">🏗️ Recent Projects</div>
+    <div class="tab" data-tab="discussions">💬 Discussions</div>
+    <div class="tab" data-tab="contractors">🔍 Find Contractors</div>
+  </div>
+</div>
+
+<!-- Main content -->
+<div class="content">
+
+  <!-- Left: tab panels -->
+  <div>
+
+    <!-- Panel: Projects -->
+    <div id="panel-projects" class="tab-panel">
+      <div style="margin-bottom:28px">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-bottom:16px;flex-wrap:wrap;gap:10px">
+          <div>
+            <div style="font-size:.72rem;font-weight:600;color:var(--orange);
+                        text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Latest Activity</div>
+            <div style="font-size:1.3rem;font-weight:800">Recent Projects</div>
+          </div>
+          <a href="${esc(HANDYMAN_API)}/projects/post"
+             style="background:var(--orange);color:#fff;padding:9px 20px;
+                    border-radius:8px;font-size:.85rem;font-weight:600">+ Post Project</a>
+        </div>
+        <div class="projects-list">${projectCards}</div>
+      </div>
+    </div>
+
+    <!-- Panel: Discussions -->
+    <div id="panel-discussions" class="tab-panel" style="display:none">
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-bottom:16px;flex-wrap:wrap;gap:10px">
+          <div>
+            <div style="font-size:.72rem;font-weight:600;color:var(--orange);
+                        text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Community Q&amp;A</div>
+            <div style="font-size:1.3rem;font-weight:800">Latest Discussions</div>
+          </div>
+          <a href="${esc(HANDYMAN_API)}/questions"
+             style="background:var(--brand);color:#fff;padding:9px 20px;
+                    border-radius:8px;font-size:.85rem;font-weight:600">View All →</a>
+        </div>
+        <div class="questions-list">${questionCards}</div>
+        <div style="margin-top:18px;text-align:center">
+          <a href="${esc(HANDYMAN_API)}/questions/ask"
+             style="display:inline-block;background:var(--orange);color:#fff;padding:12px 28px;
+                    border-radius:9px;font-weight:700;font-size:.9rem">+ Ask a Question →</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel: Find Contractors -->
+    <div id="panel-contractors" class="tab-panel" style="display:none">
+      <div>
+        <div style="font-size:.72rem;font-weight:600;color:var(--orange);
+                    text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Browse Pros</div>
+        <div style="font-size:1.3rem;font-weight:800;margin-bottom:20px">Find Contractors Near You</div>
+
+        <!-- Search bar -->
+        <div style="display:flex;gap:10px;margin-bottom:24px;flex-wrap:wrap">
+          <input id="ctr-search" type="text" placeholder="Plumber, electrician, roofer…"
+            style="flex:1;min-width:200px;padding:12px 16px;border:1.5px solid var(--border);
+                   border-radius:9px;font-size:.9rem;outline:none;font-family:inherit"
+            onfocus="this.style.borderColor='var(--brand)'"
+            onblur="this.style.borderColor='var(--border)'">
+          <input id="ctr-zip" type="text" placeholder="ZIP code" maxlength="10"
+            style="width:130px;padding:12px 16px;border:1.5px solid var(--border);
+                   border-radius:9px;font-size:.9rem;outline:none;font-family:inherit"
+            onfocus="this.style.borderColor='var(--brand)'"
+            onblur="this.style.borderColor='var(--border)'">
+          <button onclick="searchContractors()"
+            style="background:var(--brand);color:#fff;padding:12px 24px;border-radius:9px;
+                   font-weight:700;font-size:.9rem;border:none;cursor:pointer;white-space:nowrap">
+            Search →
+          </button>
+        </div>
+
+        <!-- Paid contractor cards (loaded at render time) -->
+        ${(() => {
+          if (!contractors || contractors.length === 0) return "";
+          const cCards = contractors.map(c => {
+            const name     = esc(c.name ?? c.business_name ?? c.full_name ?? "Pro Contractor");
+            const city     = esc([c.city, c.state].filter(Boolean).join(", "));
+            const about    = esc((c.about ?? c.bio ?? c.description ?? "").slice(0, 80));
+            const rate     = c.rate ? `<span style="font-weight:700;color:var(--brand)">$${esc(String(c.rate))}/hr</span>` : "";
+            const rating   = c.rating ? `<span>⭐ ${esc(String(c.rating))}</span>` : "";
+            const slug     = c.slug ?? c.contractor_id ?? c.id ?? "";
+            const profUrl  = slug ? `${HANDYMAN_API}/s/${esc(String(slug))}?ref=${refSlug}` : `${HANDYMAN_API}/contractors?ref=${refSlug}`;
+            const avatar   = c.photo_url
+              ? `<img src="${esc(c.photo_url)}" alt="${name}"
+                      style="width:46px;height:46px;border-radius:50%;object-fit:cover;flex-shrink:0">`
+              : `<div style="width:46px;height:46px;border-radius:50%;background:var(--brand);
+                             display:flex;align-items:center;justify-content:center;
+                             color:#fff;font-weight:800;font-size:1.1rem;flex-shrink:0">
+                   ${name.charAt(0)}
+                 </div>`;
+            return `
+            <a href="${profUrl}" class="ctr-card" target="_blank" rel="noopener">
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+                ${avatar}
+                <div>
+                  <div style="font-weight:700;font-size:.92rem">${name}</div>
+                  ${city ? `<div style="font-size:.75rem;color:var(--muted)">📍 ${city}</div>` : ""}
+                </div>
+                <div style="margin-left:auto;text-align:right">
+                  ${rate}
+                  <div style="font-size:.7rem;background:#dcfce7;color:#166534;
+                               padding:2px 7px;border-radius:100px;font-weight:600;margin-top:2px">✓ Paid Pro</div>
+                </div>
+              </div>
+              ${about ? `<div style="font-size:.78rem;color:var(--muted);line-height:1.4;margin-bottom:8px">${about}${(c.about ?? c.bio ?? c.description ?? "").length > 80 ? "…" : ""}</div>` : ""}
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <div style="display:flex;gap:8px;font-size:.75rem;color:var(--muted)">${rating}</div>
+                <span style="font-size:.78rem;color:var(--brand);font-weight:600">View Profile →</span>
+              </div>
+            </a>`;
+          }).join("");
+          return `
+        <div style="font-size:.8rem;font-weight:600;color:var(--muted);
+                    text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px">⭐ Featured Paid Pros</div>
+        <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:28px">${cCards}</div>
+        <div style="text-align:right;margin-bottom:24px">
+          <a href="${HANDYMAN_API}/contractors?ref=${refSlug}"
+             style="font-size:.82rem;color:var(--brand);font-weight:600">View All Contractors →</a>
+        </div>`;
+        })()}
+
+        <!-- Service category grid -->
+        <div style="font-size:.8rem;font-weight:600;color:var(--muted);
+                    text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px">Browse by Category</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:28px">
+          ${[
+            { icon: "🔧", name: "Plumbing" },
+            { icon: "⚡", name: "Electrical" },
+            { icon: "🏠", name: "Roofing" },
+            { icon: "🎨", name: "Painting" },
+            { icon: "❄️", name: "HVAC" },
+            { icon: "🌿", name: "Landscaping" },
+            { icon: "🚿", name: "Bathrooms" },
+            { icon: "🪟", name: "Windows" },
+            { icon: "🔑", name: "Locksmith" },
+            { icon: "🧹", name: "Cleaning" },
+            { icon: "🔩", name: "Carpentry" },
+            { icon: "🏊", name: "Pools" },
+          ].map(s => `
+            <a href="${esc(HANDYMAN_API)}/contractors/${s.name.toLowerCase()}?ref=${refSlug}"
+               style="background:#fff;border:1.5px solid var(--border);border-radius:10px;
+                      padding:14px 12px;text-align:center;transition:all .2s;display:block"
+               onmouseover="this.style.borderColor='var(--brand)';this.style.background='#fff8f8'"
+               onmouseout="this.style.borderColor='var(--border)';this.style.background='#fff'">
+              <div style="font-size:1.5rem;margin-bottom:5px">${s.icon}</div>
+              <div style="font-size:.8rem;font-weight:600;color:var(--text)">${s.name}</div>
+            </a>`).join("")}
+        </div>
+
+        <div style="background:linear-gradient(135deg,var(--brand),#3a0000);border-radius:14px;
+                    padding:28px;text-align:center;color:#fff">
+          <h3 style="font-size:1.2rem;font-weight:800;margin-bottom:8px">Are You a Contractor?</h3>
+          <p style="opacity:.85;font-size:.88rem;margin-bottom:18px">
+            Join 5,000+ pros on Handyman.com. Get leads, build your reputation, and grow your business.
+          </p>
+          <a href="${esc(signupLink)}"
+             style="display:inline-block;background:var(--orange);color:#fff;padding:12px 28px;
+                    border-radius:9px;font-weight:700;font-size:.9rem">Join Free →</a>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Right: sidebar -->
+  <div class="sidebar">
+    <div class="cta-sidebar">
+      <h3>Are You a Contractor?</h3>
+      <p>Join our network, get featured, and receive quality project leads in your area.</p>
+      <a href="${esc(signupLink)}" class="btn-sidebar">Join Free →</a>
+    </div>
+
+    <div class="sidebar-card">
+      <div class="sidebar-title">Quick Actions</div>
+      <a href="${esc(HANDYMAN_API)}/projects/post" class="post-btn" style="margin-bottom:10px">📋 Post a Project</a>
+      <a href="${esc(HANDYMAN_API)}/questions"     class="ask-btn">💬 Ask a Question</a>
+    </div>
+
+    <div class="sidebar-card">
+      <div class="sidebar-title">Platform Stats</div>
+      <div class="stat-row"><span class="stat-row-lbl">Active Contractors</span><span class="stat-row-val">5,000+</span></div>
+      <div class="stat-row"><span class="stat-row-lbl">Projects Posted</span><span class="stat-row-val">12,000+</span></div>
+      <div class="stat-row"><span class="stat-row-lbl">Q&amp;A Answered</span><span class="stat-row-val">8,500+</span></div>
+      <div class="stat-row"><span class="stat-row-lbl">Avg Rating</span><span class="stat-row-val">4.8 ★</span></div>
+    </div>
+
+    <div class="sidebar-card">
+      <div class="sidebar-title">Browse Services</div>
+      <div style="display:flex;flex-wrap:wrap">${serviceTags}</div>
+    </div>
+
+    <!-- Handyman.com mini card in sidebar -->
+    <div class="sidebar-card" style="background:linear-gradient(135deg,#fff8f0,#fff);border-color:#fde8cc">
+      <div class="sidebar-title" style="color:var(--orange)">🏠 Handyman.com</div>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:12px;line-height:1.5">
+        The #1 platform connecting homeowners with trusted local handymen &amp; contractors.
+      </p>
+      <a href="${esc(HANDYMAN_API)}" target="_blank" rel="noopener"
+         style="display:block;background:var(--brand);color:#fff;padding:10px;
+                border-radius:8px;font-weight:700;font-size:.82rem;text-align:center">
+        Visit Handyman.com →
+      </a>
+    </div>
+  </div>
+
+</div>
+
+<!-- Refer section -->
+<div class="refer-section">
+  <div class="refer-inner">
+    <div class="refer-text">
+      <h2>🤝 Partner With Handyman.com</h2>
+      <p>Own a site in the home improvement space? Become a partner, send referrals,
+         and earn commission on every paid contractor signup.</p>
+    </div>
+    <div class="refer-action">
+      <a href="${esc(HANDYMAN_API)}/partners" class="btn-refer">Apply as Partner</a>
+      <a href="${esc(referLink)}"
+         style="text-align:center;font-size:.82rem;color:var(--muted)">Or get your referral link →</a>
+    </div>
+  </div>
+</div>
+
+<!-- Handyman.com Feature Section -->
+${handymanSectionHtml}
+
+<!-- Partner Domains Section -->
+${partnerSectionHtml}
+
+<!-- Related Domains Section -->
+${relatedSectionHtml}
+
+<!-- Footer -->
+<footer>
+  <div class="footer-links">
+    <a href="${esc(HANDYMAN_API)}" target="_blank">Handyman.com</a>
+    <a href="${esc(HANDYMAN_API)}/contractors" target="_blank">Find Contractors</a>
+    <a href="${esc(HANDYMAN_API)}/projects/post" target="_blank">Post a Project</a>
+    <a href="${esc(HANDYMAN_API)}/questions" target="_blank">Community</a>
+    <a href="${esc(HANDYMAN_API)}/partners" target="_blank">Partner Program</a>
+    <a href="${esc(HANDYMAN_API)}/privacy" target="_blank">Privacy</a>
+    <a href="${esc(HANDYMAN_API)}/terms" target="_blank">Terms</a>
+  </div>
+  <p>© ${year} Handyman.com Partner Network · Powered by <a href="https://vnoc.com" target="_blank">VNOC</a></p>
+</footer>
+
+<script>
+// Tab switching
+document.querySelectorAll('.tab[data-tab]').forEach(function(tab) {
+  tab.addEventListener('click', function() {
+    var target = this.getAttribute('data-tab');
+    // Update tab active state
+    document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
+    this.classList.add('active');
+    // Show/hide panels
+    document.querySelectorAll('.tab-panel').forEach(function(p){ p.style.display = 'none'; });
+    var panel = document.getElementById('panel-' + target);
+    if (panel) { panel.style.display = 'block'; }
+    // Scroll to content area
+    document.querySelector('.content').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+
+// Contractor search
+function searchContractors() {
+  var q   = (document.getElementById('ctr-search').value || '').trim();
+  var zip = (document.getElementById('ctr-zip').value || '').trim();
+  var url = '${HANDYMAN_API}/contractors';
+  var params = [];
+  if (q)   params.push('q='   + encodeURIComponent(q));
+  if (zip) params.push('zip=' + encodeURIComponent(zip));
+  params.push('ref=${refSlug}');
+  if (params.length) url += '?' + params.join('&');
+  window.open(url, '_blank');
+}
+
+// Allow Enter key in search inputs
+['ctr-search','ctr-zip'].forEach(function(id) {
+  var el = document.getElementById(id);
+  if (el) el.addEventListener('keydown', function(e){ if (e.key === 'Enter') searchContractors(); });
+});
+</script>
+
+</body>
+</html>`;
+}

@@ -1,0 +1,15 @@
+name = "handyman-contractors"
+main = "src/contractors-worker.js"
+compatibility_date = "2024-01-01"
+account_id = "04366e6a18a185bcae6be03a3bd99aca"
+
+[vars]
+HANDYMAN_API_URL = "https://www.handyman.com"
+# WORKER_API_KEY is a secret — set via: wrangler secret put WORKER_API_KEY
+
+# KV cache — create with: wrangler kv:namespace create "handyman-cache"
+# then paste the returned id below
+[[kv_namespaces]]
+binding = "CACHE"
+id = "a59dfe352efe42c88d8bc494cb0994f6"
+preview_id = "a59dfe352efe42c88d8bc494cb0994f6"

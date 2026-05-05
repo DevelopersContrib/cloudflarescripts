@@ -1,0 +1,16 @@
+{
+  "name": "handymanroot2026",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Handyman CF Worker templates — managed via manage.vnoc.com/v2/cfbuilder",
+  "scripts": {
+    "dev:contractors": "wrangler dev --config wrangler.contractors.toml",
+    "dev:community": "wrangler dev --config wrangler.community.toml",
+    "deploy:contractors": "wrangler deploy --config wrangler.contractors.toml",
+    "deploy:community": "wrangler deploy --config wrangler.community.toml",
+    "deploy:all": "npm run deploy:contractors && npm run deploy:community"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
