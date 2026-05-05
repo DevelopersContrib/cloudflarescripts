@@ -308,31 +308,40 @@ async function fetchContribTasks(hostname, env) {
     if (c) return JSON.parse(c);
   }
   try {
-    // Try domain-specific tasks first, fall back to latest
-    const res = await fetch(
+    // Endpoints tried in order: manage.vnoc.com (PHP, live now) → contrib.com Next.js (when deployed)
+    const endpoints = [
+      `https://manage.vnoc.com/v2/cfbuilder/get_contrib_tasks?domain=${encodeURIComponent(hostname)}&limit=6`,
       `https://www.contrib.com/api/public/domain_tasks?domain=${encodeURIComponent(hostname)}&limit=6`,
-      { headers: { Accept: "application/json" } }
-    );
-    if (res.ok) {
-      const data = await res.json();
-      const list = data.tasks ?? data ?? [];
-      if (Array.isArray(list) && list.length > 0) {
-        if (env.CACHE) await env.CACHE.put(`contrib:tasks:${hostname}`, JSON.stringify(list), { expirationTtl: CACHE_TTL });
-        return list;
-      }
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const res = await fetch(endpoint, { headers: { Accept: "application/json" } });
+        if (res.ok) {
+          const data = await res.json();
+          const list = data.tasks ?? data ?? [];
+          if (Array.isArray(list) && list.length > 0) {
+            if (env.CACHE) await env.CACHE.put(`contrib:tasks:${hostname}`, JSON.stringify(list), { expirationTtl: CACHE_TTL });
+            return list;
+          }
+        }
+      } catch (_) {}
     }
-    // Fallback: latest tasks
-    const res2 = await fetch(`https://www.contrib.com/api/public/domain_tasks?limit=6`, {
-      headers: { Accept: "application/json" }
-    });
-    if (res2.ok) {
-      const data2 = await res2.json();
-      const list2 = data2.tasks ?? data2 ?? [];
-      if (Array.isArray(list2)) {
-        if (env.CACHE) await env.CACHE.put(`contrib:tasks:${hostname}`, JSON.stringify(list2), { expirationTtl: CACHE_TTL });
-        return list2;
+
+    // Final fallback: latest tasks from manage.vnoc.com (no domain filter)
+    try {
+      const res2 = await fetch(`https://manage.vnoc.com/v2/cfbuilder/get_contrib_tasks?limit=6`, {
+        headers: { Accept: "application/json" }
+      });
+      if (res2.ok) {
+        const data2 = await res2.json();
+        const list2 = data2.tasks ?? data2 ?? [];
+        if (Array.isArray(list2)) {
+          if (env.CACHE) await env.CACHE.put(`contrib:tasks:${hostname}`, JSON.stringify(list2), { expirationTtl: CACHE_TTL });
+          return list2;
+        }
       }
-    }
+    } catch (_) {}
   } catch (_) {}
   return [];
 }
