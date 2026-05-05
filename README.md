@@ -1,83 +1,55 @@
-# handymanroot2026 — Handyman CF Worker Templates
+# Cloudflare Worker Scripts — VNOC Portfolio
 
-Two Cloudflare Worker landing pages for the Handyman Partner Network.
-Managed/deployed via **manage.vnoc.com/v2/cfbuilder**.
+This repo holds all Cloudflare Worker lander templates for the VNOC domain portfolio.
 
-## Workers
+## Folder Naming Convention
 
-| Worker | File | Purpose |
-|--------|------|---------|
-| `handyman-contractors` | `src/contractors-worker.js` | Contractor spotlight lander — drives signups via featured paid pros |
-| `handyman-community` | `src/community-worker.js` | Projects + Forum lander — showcases live activity to attract users |
-
-## Multi-Domain
-
-Both workers serve **any domain** pointing to them. The domain is auto-detected
-from `request.headers.host` and:
-1. Auto-registered in handyman.com's `domain_affiliates` table (partner program)
-2. Used to fetch branding/logo from VNOC API
-3. Injected into all CTA/referral links as `?ref={affiliate_id}`
-
-## Adding to cfbuilder
-
-1. Go to **manage.vnoc.com/v2/cfbuilder → Templates → New Template**
-2. Name: `handyman-contractors` | Paste contents of `src/contractors-worker.js`
-3. Name: `handyman-community` | Paste contents of `src/community-worker.js`
-4. Deploy via cfbuilder selecting the Handyman vertical
-
-## Template Variables (injected by buildLanderScript)
-
-| Variable | Example |
-|----------|---------|
-| `{{DOMAIN}}` | `apluscontractors.com` |
-| `{{PAGE_TITLE}}` | `A Plus Contractors` |
-| `{{META_DESCRIPTION}}` | Auto-generated |
-| `{{VERTICAL_COLOR}}` | `#670708` |
-| `{{LOGO_HTML}}` | `<img src="..."/>` or `""` |
-| `{{SIBLINGS_JSON}}` | `["relatedomain.com"]` |
-| `{{HANDYMAN_API_URL}}` | `https://www.handyman.com` |
-| `{{WORKER_API_KEY}}` | `WORKER_API_KEY` env var |
-| `{{HANDYMAN_SIGNUP_URL}}` | `https://www.handyman.com/signup` |
-| `{{HANDYMAN_REFER_URL}}` | `https://www.handyman.com/refer` |
-
-## KV Setup (for local dev / direct wrangler deploy)
-
-```bash
-cd handymanroot2026
-npm install
-# Create KV namespace
-wrangler kv:namespace create "handyman-cache" --config wrangler.contractors.toml
-# Update both wrangler.*.toml files with the returned KV id
-# Set secret
-wrangler secret put WORKER_API_KEY --config wrangler.contractors.toml
+```
+{vertical}-{type}/
+├── src/
+│   └── worker.js
+└── wrangler.toml
 ```
 
-## Handyman.com API endpoints (handyman2026 Next.js)
+**Examples:**
+| Folder | Worker Name | Description |
+|--------|------------|-------------|
+| `handyman-community/` | `handyman-community` | Projects + Q&A + Find Contractors lander |
+| `handyman-contractors/` | `handyman-contractors` | Paid contractor directory lander |
+| `realty-listings/` | `realty-listings` | Property listings lander |
+| `veganist-community/` | `veganist-community` | Vegan community lander |
 
-| Endpoint | Auth | Returns |
-|----------|------|---------|
-| `GET /api/public/contractors?limit=6` | None | Paid contractor spotlight |
-| `GET /api/public/projects?limit=6` | None | Latest open projects |
-| `GET /api/public/questions?limit=8` | None | Latest Q&A threads |
-| `POST /api/affiliate/register-domain` | WORKER_API_KEY | Auto-register domain affiliate |
-| `POST /api/affiliate/apply` | None (public) | External partner self-enrollment |
+## Structure
 
-## Partner Program page
-`https://www.handyman.com/partners` — public page where external site owners apply to become referral partners.
-
-## DB migrations needed (handyman2026)
-
-```bash
-cd handyman.com/handyman-new/handyman2026
-pnpm db:migrate:dev
+```
+cloudflarescripts/
+├── handyman-community/
+│   ├── src/community-worker.js
+│   └── wrangler.toml
+├── handyman-contractors/
+│   ├── src/contractors-worker.js
+│   └── wrangler.toml
+└── {vertical}-{type}/
+    ├── src/worker.js
+    └── wrangler.toml
 ```
 
-Adds tables: `domain_affiliates`, `affiliate_commissions`
+## Deploy Workflow
 
-## Add Handyman vertical to cfbuilder DB
+1. Edit worker in `src/`
+2. `git add . && git commit -m "..."` — commit to GitHub first
+3. `cd {vertical}-{type} && wrangler deploy`
 
-```sql
-INSERT INTO cloudflare_verticals (vertical_name, keywords, template_id)
-VALUES ('Handyman', 'handyman,contractor,repair,plumber,electrician,roofer,handymen,serviceprovider,tradesman', NULL)
-ON DUPLICATE KEY UPDATE keywords=VALUES(keywords);
-```
+## Rules
+
+- **Always commit to GitHub before deploying to CF**
+- One folder per worker type per vertical
+- `wrangler.toml` lives at the subfolder root (not repo root)
+- Secrets (API keys, tokens) via `wrangler secret put` — never in `wrangler.toml`
+- KV namespace IDs are shared across workers of the same vertical
+
+## Accounts
+
+- **CF Account ID:** `04366e6a18a185bcae6be03a3bd99aca`
+- **KV Namespace (handyman cache):** `a59dfe352efe42c88d8bc494cb0994f6`
+- **VNOC API:** `manage.vnoc.com/v2/domainsite/workerinfo`
