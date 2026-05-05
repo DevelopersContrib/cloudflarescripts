@@ -1188,6 +1188,7 @@ footer a{color:var(--orange)}
   <div class="nav-actions">
     <a href="${esc(HANDYMAN_API)}/contractors" class="nav-link">Find Pros</a>
     <a href="${esc(HANDYMAN_API)}/questions"   class="nav-link">Community</a>
+    <a href="https://www.domaindirectory.com/servicepage/?domain=${esc(hostname)}" class="nav-link" target="_blank" rel="noopener">Contact</a>
     <a href="${esc(signupLink)}"               class="nav-btn">Join Free</a>
   </div>
 </nav>
@@ -1478,8 +1479,10 @@ ${relatedSectionHtml}
     <a href="${esc(HANDYMAN_API)}/projects/post" target="_blank">Post a Project</a>
     <a href="${esc(HANDYMAN_API)}/questions" target="_blank">Community</a>
     <a href="${esc(HANDYMAN_API)}/partners" target="_blank">Partner Program</a>
-    <a href="${esc(HANDYMAN_API)}/privacy" target="_blank">Privacy</a>
-    <a href="${esc(HANDYMAN_API)}/terms" target="_blank">Terms</a>
+    <a href="/about">About</a>
+    <a href="/privacy">Privacy</a>
+    <a href="/terms">Terms</a>
+    <a href="https://www.domaindirectory.com/servicepage/?domain=${esc(hostname)}" target="_blank" rel="noopener">Contact</a>
   </div>
   <p>© ${year} Handyman.com Partner Network · Powered by <a href="https://vnoc.com" target="_blank">VNOC</a></p>
 </footer>
