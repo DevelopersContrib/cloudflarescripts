@@ -10,6 +10,8 @@
 const CACHE_TTL           = 15 * 60;            // 15 min — projects / questions
 const CACHE_TTL_DOMAIN    = 60 * 60;            // 60 min — VNOC domain info
 const CACHE_TTL_AFFILIATE = 60 * 60 * 24 * 30; // 30 days — affiliate ref_id
+const CACHE_TTL_PEXELS    = 60 * 60 * 24;      // 24 h  — hero image (stable per domain)
+const PEXELS_API_KEY      = "utPefUeG4YHExQqmFfamk8iIo0w5mE5EmP2ACheQkNcK3YmqQbdKqGzB";
 const BRAND_COLOR_DEFAULT = "#670708";
 const ACCENT_COLOR        = "#FF9000";
 const HANDYMAN_LOGO_URL   = "https://www.handyman.com/logo.png";
@@ -76,13 +78,14 @@ export default {
     }
 
     // Fetch domain info, affiliate ID, and content in parallel
-    const [domainInfo, refId, projects, questions, contractors, contribTasks] = await Promise.all([
+    const [domainInfo, refId, projects, questions, contractors, contribTasks, heroImage] = await Promise.all([
       fetchDomainInfo(hostname, env),
       getOrRegisterAffiliate(hostname, HANDYMAN_API, WORKER_KEY, env),
       fetchProjects(HANDYMAN_API, env),
       fetchQuestions(HANDYMAN_API, env),
       fetchContractors(HANDYMAN_API, env),
       fetchContribTasks(hostname, env),
+      fetchHeroImage(hostname, env),
     ]);
 
     // signupLink + referLink needed for several routes below
@@ -162,6 +165,7 @@ export default {
       questions,
       contractors,
       HANDYMAN_API,
+      heroImage,
     });
 
     return new Response(html, {
@@ -344,6 +348,71 @@ async function fetchContribTasks(hostname, env) {
     } catch (_) {}
   } catch (_) {}
   return [];
+}
+
+async function fetchHeroImage(hostname, env) {
+  const cacheKey = `pexels:hero:${hostname}`;
+  if (env.CACHE) {
+    const cached = await env.CACHE.get(cacheKey);
+    if (cached) return cached; // returns image URL string
+  }
+
+  try {
+    // Derive a meaningful search query from the domain name
+    const slug = hostname
+      .replace(/\.(com|net|org|io|co|us|info)$/, "")
+      .replace(/[-_.]/g, " ")
+      .trim();
+
+    // Map common home-improvement keyword patterns to richer Pexels queries
+    const queryMap = [
+      [/handyman|repair|fix|handy/i,       "handyman home repair tools"],
+      [/plumb/i,                            "plumber plumbing pipes"],
+      [/electric|wiring/i,                  "electrician wiring home"],
+      [/roof/i,                             "roofing house roof"],
+      [/paint/i,                            "house painting interior"],
+      [/hvac|heat|cool|air/i,              "HVAC air conditioning unit"],
+      [/landscape|garden|lawn/i,            "landscaping garden lawn"],
+      [/bath|shower|tile/i,                 "bathroom renovation tiles"],
+      [/kitchen|cabinet/i,                  "kitchen renovation modern"],
+      [/floor|wood|carpet/i,               "hardwood floor installation"],
+      [/window|door/i,                      "home windows doors installation"],
+      [/clean/i,                            "house cleaning professional"],
+      [/pool|swim/i,                        "swimming pool backyard"],
+      [/solar|energy/i,                     "solar panels rooftop"],
+      [/home|house|remodel|renovate/i,     "home improvement renovation"],
+      [/contractor|builder|construct/i,     "construction contractor building"],
+    ];
+
+    let query = slug; // default: use domain slug as-is
+    for (const [pattern, mapped] of queryMap) {
+      if (pattern.test(slug)) { query = mapped; break; }
+    }
+    // Fallback: append "home improvement" for unmatched domains
+    if (query === slug) query = `${slug} home improvement`;
+
+    const apiKey = env.PEXELS_API_KEY ?? PEXELS_API_KEY;
+    const res = await fetch(
+      `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=10&orientation=landscape&size=large`,
+      { headers: { Authorization: apiKey } }
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      const photos = data.photos ?? [];
+      if (photos.length > 0) {
+        // Pick a deterministic photo based on hostname hash so it's stable but varied
+        const idx = [...hostname].reduce((a, c) => a + c.charCodeAt(0), 0) % photos.length;
+        const imageUrl = photos[idx].src?.large2x ?? photos[idx].src?.large ?? photos[idx].src?.original ?? "";
+        if (imageUrl) {
+          if (env.CACHE) await env.CACHE.put(cacheKey, imageUrl, { expirationTtl: CACHE_TTL_PEXELS });
+          return imageUrl;
+        }
+      }
+    }
+  } catch (_) {}
+
+  return ""; // no image — hero falls back to solid brand color
 }
 
 async function fetchContractors(HANDYMAN_API, env) {
@@ -851,7 +920,7 @@ function buildHandymanSection(HANDYMAN_API, signupLink) {
 
 // ─── Page renderer ────────────────────────────────────────────────────────────
 
-function renderPage({ hostname, domainInfo, signupLink, referLink, projects, questions, contractors, HANDYMAN_API }) {
+function renderPage({ hostname, domainInfo, signupLink, referLink, projects, questions, contractors, HANDYMAN_API, heroImage }) {
   const year       = new Date().getFullYear();
   const brandColor = domainInfo.brand_color ?? BRAND_COLOR_DEFAULT;
   const siteName   = esc(domainInfo.site_name);
@@ -981,7 +1050,9 @@ a{text-decoration:none;color:inherit}
 .nav-btn:hover{background:#e07800}
 
 /* Hero */
-.hero{background:var(--brand);padding:80px 24px 0;text-align:center;overflow:hidden}
+.hero{background:var(--brand);padding:80px 24px 0;text-align:center;overflow:hidden;position:relative}
+.hero-bg{position:absolute;inset:0;background-size:cover;background-position:center;opacity:.22;z-index:0;pointer-events:none}
+.hero>*:not(.hero-bg){position:relative;z-index:1}
 .hero-badge{display:inline-flex;align-items:center;gap:6px;
             background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);
             color:rgba(255,255,255,.9);padding:6px 16px;border-radius:100px;
@@ -1189,8 +1260,17 @@ footer a{color:var(--orange)}
     ${domainInfo.logo_html
       ? domainInfo.logo_html
       : domainInfo.logo_url
-        ? `<img src="${esc(domainInfo.logo_url)}" alt="${siteName}" style="height:32px;object-fit:contain">`
-        : `<div class="icon">🔨</div>`}
+        ? `<img src="${esc(domainInfo.logo_url)}" alt="${siteName}"
+               style="height:34px;max-width:140px;object-fit:contain"
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+        : ""}
+    ${!domainInfo.logo_html ? `<div class="gen-logo" ${domainInfo.logo_url ? 'style="display:none"' : ""}>
+      <svg width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg">
+        <rect width="34" height="34" rx="8" fill="${ACCENT_COLOR}"/>
+        <text x="17" y="24" text-anchor="middle" font-family="Arial,sans-serif"
+              font-weight="900" font-size="18" fill="#fff">${esc(siteName.charAt(0).toUpperCase())}</text>
+      </svg>
+    </div>` : ""}
     <span>${siteName}</span>
   </div>
   <div class="nav-actions">
@@ -1203,6 +1283,7 @@ footer a{color:var(--orange)}
 
 <!-- Hero -->
 <section class="hero">
+  ${heroImage ? `<div class="hero-bg" style="background-image:url('${esc(heroImage)}')"></div>` : ""}
   <div class="hero-badge">💬 Active Community · Real Projects</div>
   <h1>Real Projects.<br><span>Real Answers.</span></h1>
   <p>Browse live home improvement projects, read community Q&amp;A, and connect with top-rated contractors.</p>

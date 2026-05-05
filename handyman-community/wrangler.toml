@@ -5,6 +5,7 @@ account_id = "04366e6a18a185bcae6be03a3bd99aca"
 
 [vars]
 HANDYMAN_API_URL = "https://www.handyman.com"
+PEXELS_API_KEY   = "utPefUeG4YHExQqmFfamk8iIo0w5mE5EmP2ACheQkNcK3YmqQbdKqGzB"
 # WORKER_API_KEY is a secret — set via: wrangler secret put WORKER_API_KEY
 
 # Reuse same KV namespace as contractors worker
